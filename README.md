@@ -111,7 +111,8 @@ sudo bash install.sh
 ```
 
 `install.sh` will:
-- Detect whether this is a fresh install or an update
+- Uncomment `user_allow_other` in `/etc/fuse.conf`
+- Install a systemd drop-in for `rp2040fs@srt` that adds `-o allow_other`
 - Copy all files to `/mnt/srt/`
 - Install and enable all systemd services and the watchdog timer
 - Set correct ownership
@@ -161,9 +162,7 @@ journalctl -fu srt-watchdog
 `srt-init` runs `srt-setup` immediately on start. Once the first successful
 setup completes it touches `/run/srt/ready`. `srt-go` polls for this file
 before starting its inotify loop, so it never races against an incomplete
-`srt-setup`. On RP2040 reconnect `srt-init` re-runs `srt-setup` and updates
-the sentinel; the watchdog detects any resulting inconsistency and restarts
-`srt-go` if needed.
+`srt-setup`.
 
 ### Keep-alive and watchdog behaviour
 
