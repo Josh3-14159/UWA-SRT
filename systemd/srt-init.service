@@ -1,5 +1,5 @@
 [Unit]
-Description=SRT pin initialiser (re-inits on every rp2040 reconnect)
+Description=SRT pin initialiser (runs srt-setup on start and on every RP2040 reconnect)
 After=rp2040fs@srt.service
 BindsTo=rp2040fs@srt.service
 
@@ -7,8 +7,10 @@ BindsTo=rp2040fs@srt.service
 Type=simple
 User=srt
 ExecStart=/mnt/srt/srt-init
-Restart=on-failure
-RestartSec=3s
+Restart=always
+RestartSec=5s
+StartLimitIntervalSec=120
+StartLimitBurst=10
 StandardOutput=journal
 StandardError=journal
 

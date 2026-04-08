@@ -1,4 +1,4 @@
-# srt — Small Radio Telescope Controller
+# UWA-SRT — Small Radio Telescope Controller
 
 A filesystem abstraction layer for controlling a GS-232-compatible telescope
 rotator using a Waveshare RP2040 Zero exposed via
@@ -105,23 +105,34 @@ sudo apt install inotify-tools
 sudo useradd --system --no-create-home srt
 
 # 2. Clone and install
-git clone <repo-url> srt-controller
-cd srt-controller
+git clone https://github.com/<org>/UWA-SRT.git
+cd UWA-SRT
 sudo bash install.sh
 ```
 
 `install.sh` will:
-- Create `/mnt/srt/` and copy all files into place
-- Install and enable `srt-init.service` and `srt-go.service`
-- Set correct ownership to the `srt` user
+- Detect whether this is a fresh install or an update
+- Copy all files to `/mnt/srt/`
+- Install and enable all systemd services and the watchdog timer
+- Set correct ownership
 - Delete the cloned repo directory (the live copy lives at `/mnt/srt/`)
 
-After installation, plug in the RP2040. The services start automatically via
-udev/systemd. To start manually:
+---
+
+## Updating
+
+Pull the repo and re-run `install.sh`:
 
 ```bash
-systemctl start srt-init srt-go
+git clone https://github.com/<org>/UWA-SRT.git
+cd UWA-SRT
+sudo bash install.sh
 ```
+
+The installer detects the existing installation, shows a diff of what has
+changed, and asks for confirmation before proceeding. Config files (calibration,
+pin map) are updated individually with per-file confirmation so local changes
+are not accidentally overwritten.
 
 ---
 
@@ -129,18 +140,35 @@ systemctl start srt-init srt-go
 
 | Service | Role |
 |---|---|
-| `rp2040fs@srt` | FUSE mount (from rp2040-gpio-fs) |
-| `srt-init` | Watches journal for `Device alive.`, re-runs `srt-setup` on each reconnect |
+| `rp2040fs@srt` | FUSE mount — from rp2040-gpio-fs, managed by udev |
+| `srt-init` | Runs `srt-setup` at start and on every `Device alive.` reconnect |
 | `srt-go` | inotify daemon — enforces mutual exclusion, proxies `go/` → `drive/` |
+| `srt-watchdog.timer` | Fires `srt-watchdog` every 30s |
+| `srt-watchdog` | Health check — verifies `go/`, `drive/`, and `srt-go`; recovers if broken |
 
 ```bash
 # Check status
-systemctl status srt-init srt-go
+systemctl status srt-init srt-go srt-watchdog.timer
 
 # Watch logs
 journalctl -fu srt-init
 journalctl -fu srt-go
+journalctl -fu srt-watchdog
 ```
+
+### Keep-alive and watchdog behaviour
+
+`srt-go` sends a `WATCHDOG=1` ping to systemd every 10 seconds. If systemd
+receives no ping within 30 seconds it kills and restarts the service
+automatically.
+
+`srt-watchdog.timer` fires every 30 seconds and checks that `go/` is writable,
+`drive/` symlinks resolve, and `srt-go` is active. If anything is broken it
+runs `srt-setup` to recover the filesystem state and restarts `srt-go`.
+
+Both `srt-init` and `srt-go` use `Restart=always` with a 5-second back-off,
+allowing up to 10 restarts per 2-minute window before systemd marks the service
+as failed.
 
 ---
 
@@ -152,8 +180,7 @@ Edit `/mnt/srt/config/pin_map` then run:
 sudo -u srt bash /mnt/srt/srt-setup
 ```
 
-Or simply replug the RP2040 — `srt-init` will call `srt-setup` automatically
-on reconnect.
+Or replug the RP2040 — `srt-init` calls `srt-setup` automatically on reconnect.
 
 ---
 

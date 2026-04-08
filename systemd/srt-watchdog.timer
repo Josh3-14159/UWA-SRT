@@ -1,0 +1,12 @@
+[Unit]
+Description=SRT watchdog timer — fires every 30 seconds
+Requires=srt-watchdog.service
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=srt-watchdog.service
+
+[Install]
+WantedBy=timers.target

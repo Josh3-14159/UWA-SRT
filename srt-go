@@ -2,45 +2,59 @@
 # srt-go — watches go/ for writes, enforces per-axis mutual exclusion,
 #           and proxies the result to drive/ symlinks.
 #
+# Sends WATCHDOG=1 keepalives to systemd every $WATCHDOG_PING seconds.
+#
 # Az axis:  cw  and ccw  are exclusive — writing 1 to one zeros the other
 # El axis:  up  and dn   are exclusive — writing 1 to one zeros the other
 # Az and El are fully independent — both axes may slew simultaneously.
-#
-# Usage:
-#   echo 1 > /mnt/srt/go/cw       start slewing CW
-#   echo 0 > /mnt/srt/go/cw       stop CW
-#   echo 0 > /mnt/srt/go/*        stop all
 
 SRT=/mnt/srt
 GO="$SRT/go"
 DRIVE="$SRT/drive"
+WATCHDOG_PING=10
 
 set -euo pipefail
 
+log() { echo "[srt-go] $*"; }
+
 for f in cw ccw up dn; do
     if [ ! -f "$GO/$f" ]; then
-        echo "[srt-go] ERROR: $GO/$f not found — run srt-setup first." >&2
-        exit 1
+        log "ERROR: $GO/$f not found — run srt-setup first." >&2; exit 1
     fi
     if [ ! -L "$DRIVE/$f" ]; then
-        echo "[srt-go] ERROR: $DRIVE/$f symlink not found — run srt-setup first." >&2
-        exit 1
+        log "ERROR: $DRIVE/$f symlink not found — run srt-setup first." >&2; exit 1
     fi
 done
 
 command -v inotifywait >/dev/null 2>&1 || {
-    echo "[srt-go] ERROR: inotifywait not found — install inotify-tools." >&2
-    exit 1
+    log "ERROR: inotifywait not found — install inotify-tools." >&2; exit 1
 }
 
-log() { echo "[srt-go] $*"; }
+watchdog_ping() {
+    while true; do
+        systemd-notify WATCHDOG=1 2>/dev/null || true
+        sleep "$WATCHDOG_PING"
+    done
+}
+watchdog_ping &
+WATCHDOG_PID=$!
+
+cleanup() {
+    log "Shutting down — zeroing all drive pins."
+    for f in cw ccw up dn; do
+        echo "0" > "$DRIVE/$f" 2>/dev/null || true
+        echo "0" > "$GO/$f"    2>/dev/null || true
+    done
+    kill "$WATCHDOG_PID" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+systemd-notify --ready 2>/dev/null || true
 
 apply_axis() {
-    local req="$1"
-    local opp="$2"
-
+    local req="$1" opp="$2"
     local val
-    val=$(cat "$GO/$req" | tr -d '[:space:]')
+    val=$(tr -d '[:space:]' < "$GO/$req")
 
     if [[ "$val" != "0" && "$val" != "1" ]]; then
         log "WARN: ignored invalid value '$val' written to go/$req"
@@ -62,14 +76,8 @@ log "Started. Watching $GO for changes."
 
 inotifywait -m -q -e close_write --format '%f' "$GO" | while read -r filename; do
     case "$filename" in
-        cw|ccw)
-            apply_axis "$filename" "$([ "$filename" = cw ] && echo ccw || echo cw)"
-            ;;
-        up|dn)
-            apply_axis "$filename" "$([ "$filename" = up ] && echo dn || echo up)"
-            ;;
-        *)
-            log "WARN: ignored write to unknown file go/$filename"
-            ;;
+        cw|ccw) apply_axis "$filename" "$([ "$filename" = cw ] && echo ccw || echo cw)" ;;
+        up|dn)  apply_axis "$filename" "$([ "$filename" = up ] && echo dn  || echo up)"  ;;
+        *)      log "WARN: ignored write to unknown file go/$filename" ;;
     esac
 done

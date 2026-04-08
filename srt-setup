@@ -1,6 +1,7 @@
 #!/bin/bash
-# srt-setup — build the /mnt/srt abstraction layer from config/pin_map
-# Called by srt-init on every "Device alive." event, and can be run manually.
+# srt-setup — build the /mnt/srt abstraction layer from config/pin_map.
+# Called by srt-init on start and on every "Device alive." event.
+# Can also be run manually after editing config/pin_map.
 
 RP2040_FS=/mnt/rp2040
 SRT=/mnt/srt

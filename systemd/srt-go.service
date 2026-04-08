@@ -4,12 +4,15 @@ After=rp2040fs@srt.service srt-init.service
 BindsTo=rp2040fs@srt.service
 
 [Service]
-Type=simple
+Type=notify
 User=srt
 ExecStartPre=/bin/sleep 2
 ExecStart=/mnt/srt/srt-go
-Restart=on-failure
-RestartSec=3s
+Restart=always
+RestartSec=5s
+StartLimitIntervalSec=120
+StartLimitBurst=10
+WatchdogSec=30s
 StandardOutput=journal
 StandardError=journal
 

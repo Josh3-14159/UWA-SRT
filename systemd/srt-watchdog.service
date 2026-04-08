@@ -1,0 +1,10 @@
+[Unit]
+Description=SRT watchdog — periodic health check and recovery
+After=srt-go.service srt-init.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/mnt/srt/srt-watchdog
+StandardOutput=journal
+StandardError=journal

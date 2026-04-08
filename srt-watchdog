@@ -1,0 +1,55 @@
+#!/bin/bash
+# srt-watchdog — periodic health check fired by srt-watchdog.timer.
+# Checks go/, drive/, and srt-go.service. Runs srt-setup and restarts
+# srt-go if anything is broken.
+
+SRT=/mnt/srt
+GO="$SRT/go"
+DRIVE="$SRT/drive"
+SETUP="$SRT/srt-setup"
+
+log() { echo "[srt-watchdog] $*"; }
+
+NEEDS_SETUP=0
+NEEDS_RESTART=0
+
+if ! systemctl is-active --quiet srt-go.service; then
+    log "WARN: srt-go.service is not active."
+    NEEDS_RESTART=1
+fi
+
+for f in cw ccw up dn; do
+    if [ ! -f "$GO/$f" ]; then
+        log "WARN: $GO/$f missing."; NEEDS_SETUP=1; break
+    fi
+done
+
+if [ -d "$GO" ] && ! touch "$GO/.watchdog_probe" 2>/dev/null; then
+    log "WARN: $GO is not writable."; NEEDS_SETUP=1
+else
+    rm -f "$GO/.watchdog_probe"
+fi
+
+for f in cw ccw up dn; do
+    if [ ! -L "$DRIVE/$f" ] || [ ! -e "$DRIVE/$f" ]; then
+        log "WARN: $DRIVE/$f symlink broken or missing."; NEEDS_SETUP=1; break
+    fi
+done
+
+if [ "$NEEDS_SETUP" -eq 1 ]; then
+    log "Running srt-setup to recover filesystem state."
+    if bash "$SETUP"; then
+        log "srt-setup completed."; NEEDS_RESTART=1
+    else
+        log "ERROR: srt-setup failed — manual intervention may be required."
+        exit 1
+    fi
+fi
+
+if [ "$NEEDS_RESTART" -eq 1 ]; then
+    log "Restarting srt-go.service."
+    systemctl restart srt-go.service
+    log "srt-go.service restarted."
+fi
+
+[ "$NEEDS_SETUP" -eq 0 ] && [ "$NEEDS_RESTART" -eq 0 ] && log "All checks passed."

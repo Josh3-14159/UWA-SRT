@@ -1,6 +1,7 @@
 #!/bin/bash
-# srt-init — watches the rp2040fs@srt journal for "Device alive."
-#             and re-runs srt-setup on every reconnect.
+# srt-init — initialises pin state on start, then watches the rp2040fs@srt
+#             journal for "Device alive." and re-runs srt-setup on every
+#             reconnect.
 
 SRT=/mnt/srt
 SETUP="$SRT/srt-setup"
@@ -9,6 +10,14 @@ FUSE_SERVICE="rp2040fs@srt.service"
 set -uo pipefail
 
 log() { echo "[srt-init] $*"; }
+
+log "Starting — running srt-setup for initial state."
+if bash "$SETUP"; then
+    log "Initial srt-setup completed successfully."
+else
+    log "WARNING: Initial srt-setup failed — board may not be connected yet."
+    log "         Will retry on next 'Device alive.' event."
+fi
 
 log "Watching $FUSE_SERVICE for 'Device alive.' events..."
 
