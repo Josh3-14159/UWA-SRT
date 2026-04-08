@@ -1,0 +1,10 @@
+# SRT pin map — source of truth for all GPIO assignments
+# Format: logical_name = gpioN
+# Edit this file and re-run srt-setup to remap any pin.
+
+az_enc    = gpio26
+el_enc    = gpio27
+drive_cw  = gpio5
+drive_ccw = gpio4
+drive_up  = gpio3
+drive_dn  = gpio2

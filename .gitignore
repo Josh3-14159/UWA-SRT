@@ -1,0 +1,10 @@
+# Runtime symlinks created by srt-setup — generated, not tracked.
+enc/az_raw
+enc/el_raw
+drive/cw
+drive/ccw
+drive/up
+drive/dn
+
+# go/ state files — runtime only
+go/

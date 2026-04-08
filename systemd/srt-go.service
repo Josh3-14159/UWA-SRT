@@ -1,0 +1,17 @@
+[Unit]
+Description=SRT go/ axis controller (inotify mutual exclusion daemon)
+After=rp2040fs@srt.service srt-init.service
+BindsTo=rp2040fs@srt.service
+
+[Service]
+Type=simple
+User=srt
+ExecStartPre=/bin/sleep 2
+ExecStart=/mnt/srt/srt-go
+Restart=on-failure
+RestartSec=3s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

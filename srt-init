@@ -1,0 +1,24 @@
+#!/bin/bash
+# srt-init — watches the rp2040fs@srt journal for "Device alive."
+#             and re-runs srt-setup on every reconnect.
+
+SRT=/mnt/srt
+SETUP="$SRT/srt-setup"
+FUSE_SERVICE="rp2040fs@srt.service"
+
+set -uo pipefail
+
+log() { echo "[srt-init] $*"; }
+
+log "Watching $FUSE_SERVICE for 'Device alive.' events..."
+
+journalctl -fu "$FUSE_SERVICE" -o cat | while read -r line; do
+    if [[ "$line" == *"Device alive."* ]]; then
+        log "Device alive. detected — running srt-setup"
+        if bash "$SETUP"; then
+            log "srt-setup completed successfully."
+        else
+            log "ERROR: srt-setup failed (exit $?) — check the log above."
+        fi
+    fi
+done

@@ -1,0 +1,6 @@
+# Azimuth encoder calibration
+# enc2az: az_deg = (raw - enc_min) * deg_range / (enc_max - enc_min)
+
+enc_min   = 19156
+enc_max   = 63199
+deg_range = 363

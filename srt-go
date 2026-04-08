@@ -1,0 +1,75 @@
+#!/bin/bash
+# srt-go — watches go/ for writes, enforces per-axis mutual exclusion,
+#           and proxies the result to drive/ symlinks.
+#
+# Az axis:  cw  and ccw  are exclusive — writing 1 to one zeros the other
+# El axis:  up  and dn   are exclusive — writing 1 to one zeros the other
+# Az and El are fully independent — both axes may slew simultaneously.
+#
+# Usage:
+#   echo 1 > /mnt/srt/go/cw       start slewing CW
+#   echo 0 > /mnt/srt/go/cw       stop CW
+#   echo 0 > /mnt/srt/go/*        stop all
+
+SRT=/mnt/srt
+GO="$SRT/go"
+DRIVE="$SRT/drive"
+
+set -euo pipefail
+
+for f in cw ccw up dn; do
+    if [ ! -f "$GO/$f" ]; then
+        echo "[srt-go] ERROR: $GO/$f not found — run srt-setup first." >&2
+        exit 1
+    fi
+    if [ ! -L "$DRIVE/$f" ]; then
+        echo "[srt-go] ERROR: $DRIVE/$f symlink not found — run srt-setup first." >&2
+        exit 1
+    fi
+done
+
+command -v inotifywait >/dev/null 2>&1 || {
+    echo "[srt-go] ERROR: inotifywait not found — install inotify-tools." >&2
+    exit 1
+}
+
+log() { echo "[srt-go] $*"; }
+
+apply_axis() {
+    local req="$1"
+    local opp="$2"
+
+    local val
+    val=$(cat "$GO/$req" | tr -d '[:space:]')
+
+    if [[ "$val" != "0" && "$val" != "1" ]]; then
+        log "WARN: ignored invalid value '$val' written to go/$req"
+        cat "$DRIVE/$req" > "$GO/$req"
+        return
+    fi
+
+    if [[ "$val" == "1" ]]; then
+        echo "0" > "$DRIVE/$opp"
+        echo "0" > "$GO/$opp"
+        log "$req=1 → zeroed $opp"
+    fi
+
+    echo "$val" > "$DRIVE/$req"
+    log "$req=$val"
+}
+
+log "Started. Watching $GO for changes."
+
+inotifywait -m -q -e close_write --format '%f' "$GO" | while read -r filename; do
+    case "$filename" in
+        cw|ccw)
+            apply_axis "$filename" "$([ "$filename" = cw ] && echo ccw || echo cw)"
+            ;;
+        up|dn)
+            apply_axis "$filename" "$([ "$filename" = up ] && echo dn || echo up)"
+            ;;
+        *)
+            log "WARN: ignored write to unknown file go/$filename"
+            ;;
+    esac
+done

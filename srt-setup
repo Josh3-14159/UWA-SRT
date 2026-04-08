@@ -1,0 +1,72 @@
+#!/bin/bash
+# srt-setup — build the /mnt/srt abstraction layer from config/pin_map
+# Called by srt-init on every "Device alive." event, and can be run manually.
+
+RP2040_FS=/mnt/rp2040
+SRT=/mnt/srt
+
+set -euo pipefail
+
+PIN_MAP="$SRT/config/pin_map"
+
+log() { echo "[srt-setup] $*"; }
+
+pin() {
+    grep -E "^$1\s*=" "$PIN_MAP" | awk -F'=' '{gsub(/[[:space:]]/,"",$2); print $2}'
+}
+
+rp2040() {
+    echo "$RP2040_FS/gpio/$1/$2"
+}
+
+log "Creating directory structure under $SRT"
+mkdir -p "$SRT/enc" "$SRT/drive" "$SRT/go" "$SRT/config"
+
+AZ_ENC=$(pin az_enc)
+EL_ENC=$(pin el_enc)
+DRV_CW=$(pin drive_cw)
+DRV_CCW=$(pin drive_ccw)
+DRV_UP=$(pin drive_up)
+DRV_DN=$(pin drive_dn)
+
+log "Pin assignments: az=$AZ_ENC el=$EL_ENC cw=$DRV_CW ccw=$DRV_CCW up=$DRV_UP dn=$DRV_DN"
+
+log "Waiting for FUSE mount at $RP2040_FS ..."
+for i in $(seq 1 30); do
+    if [ -d "$RP2040_FS/gpio" ]; then
+        log "FUSE mount ready."
+        break
+    fi
+    sleep 1
+    if [ "$i" -eq 30 ]; then
+        log "ERROR: FUSE mount not available after 30s — aborting."
+        exit 1
+    fi
+done
+
+log "Setting encoder pins to ADC mode"
+echo "adc" > "$(rp2040 "$AZ_ENC" mode)"
+echo "adc" > "$(rp2040 "$EL_ENC" mode)"
+
+log "Setting drive pins to output mode and zeroing"
+for GPIO in "$DRV_CW" "$DRV_CCW" "$DRV_UP" "$DRV_DN"; do
+    echo "out" > "$(rp2040 "$GPIO" mode)"
+    echo "0"   > "$(rp2040 "$GPIO" value)"
+done
+
+log "Creating enc/ symlinks"
+ln -sfn "$(rp2040 "$AZ_ENC" value)" "$SRT/enc/az_raw"
+ln -sfn "$(rp2040 "$EL_ENC" value)" "$SRT/enc/el_raw"
+
+log "Creating drive/ symlinks"
+ln -sfn "$(rp2040 "$DRV_CW"  value)" "$SRT/drive/cw"
+ln -sfn "$(rp2040 "$DRV_CCW" value)" "$SRT/drive/ccw"
+ln -sfn "$(rp2040 "$DRV_UP"  value)" "$SRT/drive/up"
+ln -sfn "$(rp2040 "$DRV_DN"  value)" "$SRT/drive/dn"
+
+log "Initialising go/ state files"
+for DIR in cw ccw up dn; do
+    echo "0" > "$SRT/go/$DIR"
+done
+
+log "srt-setup complete."

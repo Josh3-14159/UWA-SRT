@@ -1,0 +1,11 @@
+# Elevation encoder calibration
+# enc2el uses a linkage geometry model (law of cosines)
+# Adjust these if the physical linkage changes.
+
+enc_min   = 20533
+enc_max   = 56237
+arm_b     = 410
+arm_c     = 360
+link_min  = 120
+link_max  = 550
+offset    = 71

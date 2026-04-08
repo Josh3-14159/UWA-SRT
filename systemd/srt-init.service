@@ -1,0 +1,16 @@
+[Unit]
+Description=SRT pin initialiser (re-inits on every rp2040 reconnect)
+After=rp2040fs@srt.service
+BindsTo=rp2040fs@srt.service
+
+[Service]
+Type=simple
+User=srt
+ExecStart=/mnt/srt/srt-init
+Restart=on-failure
+RestartSec=3s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
