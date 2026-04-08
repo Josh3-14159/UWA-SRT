@@ -1,18 +1,24 @@
 [Unit]
 Description=SRT go/ axis controller (inotify mutual exclusion daemon)
+# Wants srt-init but does not BindsTo it — srt-go manages its own wait
+# for the sentinel so it survives srt-init restarts gracefully.
 After=rp2040fs@srt.service srt-init.service
 BindsTo=rp2040fs@srt.service
+Wants=srt-init.service
 
 [Service]
 Type=notify
 User=srt
-ExecStartPre=/bin/sleep 2
+# No ExecStartPre sleep — srt-go polls for /run/srt/ready internally
 ExecStart=/mnt/srt/srt-go
 Restart=always
 RestartSec=5s
 StartLimitIntervalSec=120
 StartLimitBurst=10
+# systemd watchdog: srt-go pings every 10s, kill+restart if silent for 30s
 WatchdogSec=30s
+# Allow up to 60s for the sentinel wait on first start
+TimeoutStartSec=60s
 StandardOutput=journal
 StandardError=journal
 

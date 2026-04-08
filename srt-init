@@ -1,23 +1,44 @@
 #!/bin/bash
-# srt-init — initialises pin state on start, then watches the rp2040fs@srt
-#             journal for "Device alive." and re-runs srt-setup on every
-#             reconnect.
+# srt-init — initialises pin state on start, touches /run/srt/ready once the
+#             first srt-setup succeeds, then watches the rp2040fs@srt journal
+#             for "Device alive." and re-runs srt-setup on every reconnect.
+#
+# /run/srt/ready is the sentinel that srt-go polls before starting. It is
+# cleared on srt-init exit (i.e. on service stop/restart) so srt-go always
+# waits for a fresh successful setup before proceeding.
 
 SRT=/mnt/srt
 SETUP="$SRT/srt-setup"
 FUSE_SERVICE="rp2040fs@srt.service"
+SENTINEL=/run/srt/ready
 
 set -uo pipefail
 
 log() { echo "[srt-init] $*"; }
 
+# Ensure sentinel dir exists and clear any stale sentinel from a previous run
+mkdir -p /run/srt
+rm -f "$SENTINEL"
+
+cleanup() {
+    log "Exiting — clearing sentinel."
+    rm -f "$SENTINEL"
+}
+trap cleanup EXIT
+
+# ── run once at startup ───────────────────────────────────────────────────────
+
 log "Starting — running srt-setup for initial state."
 if bash "$SETUP"; then
     log "Initial srt-setup completed successfully."
+    touch "$SENTINEL"
+    log "Sentinel written to $SENTINEL — srt-go may now start."
 else
     log "WARNING: Initial srt-setup failed — board may not be connected yet."
     log "         Will retry on next 'Device alive.' event."
 fi
+
+# ── watch for reconnects ──────────────────────────────────────────────────────
 
 log "Watching $FUSE_SERVICE for 'Device alive.' events..."
 
@@ -26,8 +47,10 @@ journalctl -fu "$FUSE_SERVICE" -o cat | while read -r line; do
         log "Device alive. detected — running srt-setup"
         if bash "$SETUP"; then
             log "srt-setup completed successfully."
+            touch "$SENTINEL"
         else
             log "ERROR: srt-setup failed (exit $?) — check the log above."
+            rm -f "$SENTINEL"
         fi
     fi
 done

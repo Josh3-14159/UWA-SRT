@@ -1,12 +1,13 @@
 #!/bin/bash
-# srt-watchdog — periodic health check fired by srt-watchdog.timer.
-# Checks go/, drive/, and srt-go.service. Runs srt-setup and restarts
+# srt-watchdog — periodic health check fired by srt-watchdog.timer every 30s.
+# Checks go/, drive/ symlinks, and srt-go.service. Runs srt-setup and restarts
 # srt-go if anything is broken.
 
 SRT=/mnt/srt
 GO="$SRT/go"
 DRIVE="$SRT/drive"
 SETUP="$SRT/srt-setup"
+SENTINEL=/run/srt/ready
 
 log() { echo "[srt-watchdog] $*"; }
 
@@ -39,7 +40,9 @@ done
 if [ "$NEEDS_SETUP" -eq 1 ]; then
     log "Running srt-setup to recover filesystem state."
     if bash "$SETUP"; then
-        log "srt-setup completed."; NEEDS_RESTART=1
+        log "srt-setup completed."
+        touch "$SENTINEL"
+        NEEDS_RESTART=1
     else
         log "ERROR: srt-setup failed — manual intervention may be required."
         exit 1

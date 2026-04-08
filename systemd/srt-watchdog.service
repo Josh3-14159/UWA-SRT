@@ -4,6 +4,7 @@ After=srt-go.service srt-init.service
 
 [Service]
 Type=oneshot
+# Runs as root — needs to call systemctl restart
 User=root
 ExecStart=/mnt/srt/srt-watchdog
 StandardOutput=journal

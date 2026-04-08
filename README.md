@@ -141,8 +141,8 @@ are not accidentally overwritten.
 | Service | Role |
 |---|---|
 | `rp2040fs@srt` | FUSE mount — from rp2040-gpio-fs, managed by udev |
-| `srt-init` | Runs `srt-setup` at start and on every `Device alive.` reconnect |
-| `srt-go` | inotify daemon — enforces mutual exclusion, proxies `go/` → `drive/` |
+| `srt-init` | Runs `srt-setup` at start and on every `Device alive.` reconnect. Touches `/run/srt/ready` after first successful setup. |
+| `srt-go` | inotify daemon — waits for `/run/srt/ready`, enforces mutual exclusion, proxies `go/` → `drive/` |
 | `srt-watchdog.timer` | Fires `srt-watchdog` every 30s |
 | `srt-watchdog` | Health check — verifies `go/`, `drive/`, and `srt-go`; recovers if broken |
 
@@ -155,6 +155,15 @@ journalctl -fu srt-init
 journalctl -fu srt-go
 journalctl -fu srt-watchdog
 ```
+
+### Start-up ordering
+
+`srt-init` runs `srt-setup` immediately on start. Once the first successful
+setup completes it touches `/run/srt/ready`. `srt-go` polls for this file
+before starting its inotify loop, so it never races against an incomplete
+`srt-setup`. On RP2040 reconnect `srt-init` re-runs `srt-setup` and updates
+the sentinel; the watchdog detects any resulting inconsistency and restarts
+`srt-go` if needed.
 
 ### Keep-alive and watchdog behaviour
 

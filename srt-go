@@ -2,33 +2,66 @@
 # srt-go — watches go/ for writes, enforces per-axis mutual exclusion,
 #           and proxies the result to drive/ symlinks.
 #
+# Waits for /run/srt/ready (written by srt-init after a successful srt-setup)
+# before starting the inotify loop. This prevents a race with srt-setup on
+# startup or after a reconnect.
+#
 # Sends WATCHDOG=1 keepalives to systemd every $WATCHDOG_PING seconds.
 #
 # Az axis:  cw  and ccw  are exclusive — writing 1 to one zeros the other
 # El axis:  up  and dn   are exclusive — writing 1 to one zeros the other
 # Az and El are fully independent — both axes may slew simultaneously.
+#
+# Usage:
+#   echo 1 > /mnt/srt/go/cw       start slewing CW
+#   echo 0 > /mnt/srt/go/cw       stop CW
+#   echo 0 > /mnt/srt/go/*        stop all
 
 SRT=/mnt/srt
 GO="$SRT/go"
 DRIVE="$SRT/drive"
-WATCHDOG_PING=10
+SENTINEL=/run/srt/ready
+WATCHDOG_PING=10        # seconds between sd_notify keepalives
+SENTINEL_TIMEOUT=60     # seconds to wait for sentinel before giving up
 
 set -euo pipefail
 
 log() { echo "[srt-go] $*"; }
 
+# ── wait for sentinel ─────────────────────────────────────────────────────────
+
+log "Waiting for $SENTINEL (srt-init must complete srt-setup first)..."
+elapsed=0
+while [ ! -f "$SENTINEL" ]; do
+    if [ "$elapsed" -ge "$SENTINEL_TIMEOUT" ]; then
+        log "ERROR: timed out after ${SENTINEL_TIMEOUT}s waiting for $SENTINEL." >&2
+        log "       Check srt-init: journalctl -u srt-init" >&2
+        exit 1
+    fi
+    sleep 1
+    (( elapsed++ )) || true
+done
+log "Sentinel found after ${elapsed}s — proceeding."
+
+# ── preflight checks ──────────────────────────────────────────────────────────
+
 for f in cw ccw up dn; do
     if [ ! -f "$GO/$f" ]; then
-        log "ERROR: $GO/$f not found — run srt-setup first." >&2; exit 1
+        log "ERROR: $GO/$f not found — srt-setup may have failed." >&2
+        exit 1
     fi
     if [ ! -L "$DRIVE/$f" ]; then
-        log "ERROR: $DRIVE/$f symlink not found — run srt-setup first." >&2; exit 1
+        log "ERROR: $DRIVE/$f symlink not found — srt-setup may have failed." >&2
+        exit 1
     fi
 done
 
 command -v inotifywait >/dev/null 2>&1 || {
-    log "ERROR: inotifywait not found — install inotify-tools." >&2; exit 1
+    log "ERROR: inotifywait not found — install inotify-tools." >&2
+    exit 1
 }
+
+# ── systemd watchdog keepalive ────────────────────────────────────────────────
 
 watchdog_ping() {
     while true; do
@@ -51,6 +84,8 @@ trap cleanup EXIT
 
 systemd-notify --ready 2>/dev/null || true
 
+# ── mutual exclusion helper ───────────────────────────────────────────────────
+
 apply_axis() {
     local req="$1" opp="$2"
     local val
@@ -71,6 +106,8 @@ apply_axis() {
     echo "$val" > "$DRIVE/$req"
     log "$req=$val"
 }
+
+# ── main inotify loop ─────────────────────────────────────────────────────────
 
 log "Started. Watching $GO for changes."
 

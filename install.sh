@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SERVICES=(srt-init.service srt-go.service)
 TIMER=srt-watchdog.timer
-WATCHDOG=srt-watchdog.service
+UNITS=(srt-init.service srt-go.service srt-watchdog.service srt-watchdog.timer)
 
 log()  { echo "[install] $*"; }
 warn() { echo "[install] WARNING: $*"; }
@@ -26,20 +26,24 @@ confirm() {
     [[ "$answer" =~ ^[Yy]$ ]]
 }
 
-[ "$EUID" -eq 0 ] || die "Run as root: sudo bash install.sh"
+# ── preflight ─────────────────────────────────────────────────────────────────
 
-id srt &>/dev/null || die "'srt' user does not exist. Run: sudo useradd --system --no-create-home srt"
+[ "$EUID" -eq 0 ] || die "Run as root: sudo bash install.sh"
+id srt &>/dev/null      || die "'srt' user does not exist. Run: sudo useradd --system --no-create-home srt"
 command -v inotifywait &>/dev/null || die "inotifywait not found. Run: sudo apt install inotify-tools"
-systemctl list-unit-files rp2040fs@.service &>/dev/null || {
-    warn "rp2040fs@.service not found — install rp2040-gpio-fs first."
-}
+systemctl list-unit-files rp2040fs@.service &>/dev/null || warn "rp2040fs@.service not found — install rp2040-gpio-fs first."
 
 SCRIPTS=(srt-setup srt-go srt-init srt-watchdog)
 CONFIGS=(config/pin_map config/az_cal config/el_cal)
-UNITS=(srt-init.service srt-go.service srt-watchdog.service srt-watchdog.timer)
+
+# ── detect existing install ───────────────────────────────────────────────────
 
 EXISTING=0
 [ -d "$DEST" ] && [ -f "$DEST/srt-setup" ] && EXISTING=1
+
+# ═════════════════════════════════════════════════════════════════════════════
+# UPDATE PATH
+# ═════════════════════════════════════════════════════════════════════════════
 
 if [ "$EXISTING" -eq 1 ]; then
     echo ""
@@ -49,31 +53,22 @@ if [ "$EXISTING" -eq 1 ]; then
     CHANGED=()
     for s in "${SCRIPTS[@]}"; do
         src="$SCRIPT_DIR/$s"; dst="$DEST/$s"
-        if [ -f "$src" ] && [ -f "$dst" ]; then
-            diff -q "$src" "$dst" &>/dev/null || CHANGED+=("$s")
-        elif [ -f "$src" ]; then
-            CHANGED+=("$s  [NEW]")
-        fi
+        if   [ -f "$src" ] && [ -f "$dst" ]; then diff -q "$src" "$dst" &>/dev/null || CHANGED+=("$s")
+        elif [ -f "$src" ];                  then CHANGED+=("$s  [NEW]"); fi
     done
 
     CHANGED_CFG=()
     for c in "${CONFIGS[@]}"; do
         src="$SCRIPT_DIR/$c"; dst="$DEST/$c"
-        if [ -f "$src" ] && [ -f "$dst" ]; then
-            diff -q "$src" "$dst" &>/dev/null || CHANGED_CFG+=("$c")
-        elif [ -f "$src" ]; then
-            CHANGED_CFG+=("$c  [NEW]")
-        fi
+        if   [ -f "$src" ] && [ -f "$dst" ]; then diff -q "$src" "$dst" &>/dev/null || CHANGED_CFG+=("$c")
+        elif [ -f "$src" ];                  then CHANGED_CFG+=("$c  [NEW]"); fi
     done
 
     CHANGED_UNITS=()
     for u in "${UNITS[@]}"; do
         src="$SCRIPT_DIR/systemd/$u"; dst="/etc/systemd/system/$u"
-        if [ -f "$src" ] && [ -f "$dst" ]; then
-            diff -q "$src" "$dst" &>/dev/null || CHANGED_UNITS+=("$u")
-        elif [ -f "$src" ]; then
-            CHANGED_UNITS+=("$u  [NEW]")
-        fi
+        if   [ -f "$src" ] && [ -f "$dst" ]; then diff -q "$src" "$dst" &>/dev/null || CHANGED_UNITS+=("$u")
+        elif [ -f "$src" ];                  then CHANGED_UNITS+=("$u  [NEW]"); fi
     done
 
     TOTAL=$(( ${#CHANGED[@]} + ${#CHANGED_CFG[@]} + ${#CHANGED_UNITS[@]} ))
@@ -133,10 +128,8 @@ if [ "$EXISTING" -eq 1 ]; then
         cf="${c%  \[NEW\]}"
         src="$SCRIPT_DIR/$cf"; dst="$DEST/$cf"
         if [ -f "$dst" ]; then
-            echo ""
-            echo "  Config file changed: $cf"
-            diff --color=always -u "$dst" "$src" || true
-            echo ""
+            echo ""; echo "  Config file changed: $cf"
+            diff --color=always -u "$dst" "$src" || true; echo ""
             if confirm "  Overwrite $cf?"; then
                 cp "$src" "$dst"; log "Updated $cf"
             else
@@ -163,8 +156,11 @@ if [ "$EXISTING" -eq 1 ]; then
 
     log "Cleaning up repo directory"
     cd /; rm -rf "$SCRIPT_DIR"
-
     echo ""; echo "[install] ✓ Update complete. Repo directory removed."
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FRESH INSTALL PATH
+# ═════════════════════════════════════════════════════════════════════════════
 
 else
     echo ""; echo "  No existing installation found. Fresh install to $DEST"; echo ""
@@ -192,15 +188,16 @@ else
 
     log "Removing repo directory"
     cd /; rm -rf "$SCRIPT_DIR"
-
     echo ""; echo "[install] ✓ Installation complete. Repo directory removed."
 fi
+
+# ── post-install summary ──────────────────────────────────────────────────────
 
 echo ""
 echo "  Live files:  $DEST"
 echo ""
 echo "  Services:"
-echo "    srt-init.service      — pin initialiser"
+echo "    srt-init.service      — pin initialiser + sentinel writer"
 echo "    srt-go.service        — go/ axis controller"
 echo "    srt-watchdog.timer    — health check every 30s"
 echo ""
