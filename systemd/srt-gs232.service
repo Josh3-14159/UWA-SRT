@@ -7,6 +7,8 @@ Wants=srt-init.service srt-go.service
 [Service]
 Type=simple
 User=srt
+RuntimeDirectory=srt
+RuntimeDirectoryMode=0755
 ExecStart=/usr/bin/python3 /mnt/srt/control/srt-gs232
 Restart=always
 RestartSec=5s

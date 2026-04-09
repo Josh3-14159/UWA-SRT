@@ -33,7 +33,7 @@ GO       = f"{SRT}/go"
 ENC      = f"{SRT}/enc"
 CONFIG   = f"{SRT}/config"
 SENTINEL = "/run/srt/ready"
-PTY_LINK = "/dev/srt_rotator"
+PTY_LINK = "/run/srt/rotator"
 
 AZ_RAW   = f"{ENC}/az_raw"
 EL_RAW   = f"{ENC}/el_raw"
