@@ -1,6 +1,12 @@
 #!/bin/bash
 # install.sh — deploy or update the SRT controller.
 # Run as root from inside the cloned repo: sudo bash install.sh
+#
+# Fresh install:  copies all files to /mnt/srt/, installs and enables all
+#                 systemd services and the watchdog timer, then deletes the
+#                 repo directory.
+# Update:         detects existing install, shows a diff of what will change,
+#                 asks confirmation, stops services, updates files, restarts.
 
 set -euo pipefail
 
@@ -10,11 +16,15 @@ DROPIN_DIR=/etc/systemd/system/rp2040fs@srt.service.d
 DROPIN_SRC="$SCRIPT_DIR/systemd/rp2040fs@srt.service.d/allow_other.conf"
 DROPIN_DST="$DROPIN_DIR/allow_other.conf"
 
-SERVICES=(srt-init.service srt-go.service)
-TIMER=srt-watchdog.timer
-UNITS=(srt-init.service srt-go.service srt-watchdog.service srt-watchdog.timer)
-SCRIPTS=(srt-setup srt-go srt-init srt-watchdog)
+# Files managed by this installer
+HAL_SCRIPTS=(hal/srt-setup hal/srt-init hal/srt-go)
+CTL_SCRIPTS=(control/srt-gs232 control/srt-watchdog)
 CONFIGS=(config/pin_map config/az_cal config/el_cal)
+UNITS=(srt-init.service srt-go.service srt-gs232.service srt-watchdog.service srt-watchdog.timer)
+
+# Services to start/stop (not the timer — handled separately)
+SERVICES=(srt-init.service srt-go.service srt-gs232.service)
+TIMER=srt-watchdog.timer
 
 log()  { echo "[install] $*"; }
 warn() { echo "[install] WARNING: $*"; }
@@ -28,22 +38,28 @@ confirm() {
 
 # ── preflight ─────────────────────────────────────────────────────────────────
 
-[ "$EUID" -eq 0 ]              || die "Run as root: sudo bash install.sh"
-id srt &>/dev/null             || die "'srt' user does not exist. Run: sudo useradd --system --no-create-home srt"
-command -v inotifywait &>/dev/null || die "inotifywait not found. Run: sudo apt install inotify-tools"
+[ "$EUID" -eq 0 ] \
+    || die "Run as root: sudo bash install.sh"
+id srt &>/dev/null \
+    || die "'srt' user does not exist. Run: sudo useradd --system --no-create-home srt"
+command -v inotifywait &>/dev/null \
+    || die "inotifywait not found. Run: sudo apt install inotify-tools"
+command -v python3 &>/dev/null \
+    || die "python3 not found. Run: sudo apt install python3"
 systemctl list-unit-files rp2040fs@.service &>/dev/null \
     || warn "rp2040fs@.service not found — install rp2040-gpio-fs first."
 
 # ── fuse.conf ─────────────────────────────────────────────────────────────────
 
 apply_fuse_conf() {
-    if grep -q "^user_allow_other" /etc/fuse.conf; then
+    if grep -q "^user_allow_other" /etc/fuse.conf 2>/dev/null; then
         log "fuse.conf: user_allow_other already enabled."
     else
         log "fuse.conf: enabling user_allow_other."
-        sed -i 's/#\s*user_allow_other/user_allow_other/' /etc/fuse.conf
-        # If the line was missing entirely, append it
-        grep -q "^user_allow_other" /etc/fuse.conf \
+        if [ -f /etc/fuse.conf ]; then
+            sed -i 's/#\s*user_allow_other/user_allow_other/' /etc/fuse.conf
+        fi
+        grep -q "^user_allow_other" /etc/fuse.conf 2>/dev/null \
             || echo "user_allow_other" >> /etc/fuse.conf
     fi
 }
@@ -60,68 +76,83 @@ apply_dropin() {
     fi
 }
 
+# ── copy a set of scripts to dest, preserving subdir structure ────────────────
+
+install_scripts() {
+    local scripts=("$@")
+    for s in "${scripts[@]}"; do
+        local dst_dir="$DEST/$(dirname "$s")"
+        mkdir -p "$dst_dir"
+        cp "$SCRIPT_DIR/$s" "$DEST/$s"
+        chmod +x "$DEST/$s"
+    done
+}
+
+# ── detect changed files ──────────────────────────────────────────────────────
+
+changed_files() {
+    # Usage: changed_files src_prefix dst_prefix file1 file2 ...
+    local src_pfx="$1" dst_pfx="$2"
+    shift 2
+    local changed=()
+    for f in "$@"; do
+        local src="$src_pfx/$f" dst="$dst_pfx/$f"
+        if [ -f "$src" ] && [ -f "$dst" ]; then
+            diff -q "$src" "$dst" &>/dev/null || changed+=("$f")
+        elif [ -f "$src" ]; then
+            changed+=("$f  [NEW]")
+        fi
+    done
+    printf '%s\n' "${changed[@]+"${changed[@]}"}"
+}
+
 # ── detect existing install ───────────────────────────────────────────────────
 
 EXISTING=0
-[ -d "$DEST" ] && [ -f "$DEST/srt-setup" ] && EXISTING=1
+[ -d "$DEST" ] && [ -f "$DEST/hal/srt-setup" ] && EXISTING=1
 
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # UPDATE PATH
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 if [ "$EXISTING" -eq 1 ]; then
     echo ""
     echo "  Existing SRT installation detected at $DEST"
     echo ""
 
-    CHANGED=()
-    for s in "${SCRIPTS[@]}"; do
-        src="$SCRIPT_DIR/$s"; dst="$DEST/$s"
-        if   [ -f "$src" ] && [ -f "$dst" ]; then diff -q "$src" "$dst" &>/dev/null || CHANGED+=("$s")
-        elif [ -f "$src" ];                  then CHANGED+=("$s  [NEW]"); fi
-    done
+    ALL_SCRIPTS=("${HAL_SCRIPTS[@]}" "${CTL_SCRIPTS[@]}")
 
-    CHANGED_CFG=()
-    for c in "${CONFIGS[@]}"; do
-        src="$SCRIPT_DIR/$c"; dst="$DEST/$c"
-        if   [ -f "$src" ] && [ -f "$dst" ]; then diff -q "$src" "$dst" &>/dev/null || CHANGED_CFG+=("$c")
-        elif [ -f "$src" ];                  then CHANGED_CFG+=("$c  [NEW]"); fi
-    done
+    mapfile -t CHANGED_S   < <(changed_files "$SCRIPT_DIR" "$DEST"               "${ALL_SCRIPTS[@]}")
+    mapfile -t CHANGED_CFG < <(changed_files "$SCRIPT_DIR" "$DEST"               "${CONFIGS[@]}")
+    mapfile -t CHANGED_U   < <(changed_files "$SCRIPT_DIR/systemd" "/etc/systemd/system" "${UNITS[@]}")
 
-    CHANGED_UNITS=()
-    for u in "${UNITS[@]}"; do
-        src="$SCRIPT_DIR/systemd/$u"; dst="/etc/systemd/system/$u"
-        if   [ -f "$src" ] && [ -f "$dst" ]; then diff -q "$src" "$dst" &>/dev/null || CHANGED_UNITS+=("$u")
-        elif [ -f "$src" ];                  then CHANGED_UNITS+=("$u  [NEW]"); fi
-    done
-
-    # Check drop-in separately
     DROPIN_CHANGED=0
     { [ ! -f "$DROPIN_DST" ] || ! diff -q "$DROPIN_SRC" "$DROPIN_DST" &>/dev/null; } \
         && DROPIN_CHANGED=1
 
-    TOTAL=$(( ${#CHANGED[@]} + ${#CHANGED_CFG[@]} + ${#CHANGED_UNITS[@]} + DROPIN_CHANGED ))
+    TOTAL=$(( ${#CHANGED_S[@]} + ${#CHANGED_CFG[@]} + ${#CHANGED_U[@]} + DROPIN_CHANGED ))
 
     if [ "$TOTAL" -eq 0 ]; then
         echo "  No changes detected — installed files match repo."
         echo ""
         confirm "  Force reinstall anyway?" || { echo "  Aborted."; exit 0; }
-        CHANGED=("${SCRIPTS[@]}")
-        CHANGED_CFG=("${CONFIGS[@]}")
-        CHANGED_UNITS=("${UNITS[@]}")
+        mapfile -t CHANGED_S   < <(printf '%s\n' "${ALL_SCRIPTS[@]}")
+        mapfile -t CHANGED_CFG < <(printf '%s\n' "${CONFIGS[@]}")
+        mapfile -t CHANGED_U   < <(printf '%s\n' "${UNITS[@]}")
         DROPIN_CHANGED=1
     else
         echo "  The following will be updated:"
         echo ""
-        for f in "${CHANGED[@]}";       do echo "    scripts/  $f"; done
-        for f in "${CHANGED_CFG[@]}";   do echo "    config/   $f"; done
-        for f in "${CHANGED_UNITS[@]}"; do echo "    systemd/  $f"; done
-        [ "$DROPIN_CHANGED" -eq 1 ] && echo "    drop-in/  rp2040fs@srt — allow_other"
+        for f in "${CHANGED_S[@]+"${CHANGED_S[@]}"}";   do echo "    $f"; done
+        for f in "${CHANGED_CFG[@]+"${CHANGED_CFG[@]}"}"; do echo "    $f"; done
+        for f in "${CHANGED_U[@]+"${CHANGED_U[@]}"}";   do echo "    systemd/$f"; done
+        [ "$DROPIN_CHANGED" -eq 1 ] \
+            && echo "    systemd/rp2040fs@srt.service.d/allow_other.conf"
         echo ""
 
         if confirm "  Show full diff before continuing?"; then
             echo ""
-            for s in "${SCRIPTS[@]}"; do
+            for s in "${ALL_SCRIPTS[@]}"; do
                 src="$SCRIPT_DIR/$s"; dst="$DEST/$s"
                 [ -f "$src" ] && [ -f "$dst" ] && diff --color=always -u "$dst" "$src" || true
             done
@@ -133,21 +164,22 @@ if [ "$EXISTING" -eq 1 ]; then
                 src="$SCRIPT_DIR/systemd/$u"; dst="/etc/systemd/system/$u"
                 [ -f "$src" ] && [ -f "$dst" ] && diff --color=always -u "$dst" "$src" || true
             done
-            [ "$DROPIN_CHANGED" -eq 1 ] && {
-                [ -f "$DROPIN_DST" ] && diff --color=always -u "$DROPIN_DST" "$DROPIN_SRC" || true
-            }
+            [ "$DROPIN_CHANGED" -eq 1 ] && [ -f "$DROPIN_DST" ] \
+                && diff --color=always -u "$DROPIN_DST" "$DROPIN_SRC" || true
             echo ""
         fi
 
         confirm "  Proceed with update?" || { echo "  Aborted."; exit 0; }
     fi
 
+    # Stop services
     log "Stopping services..."
     systemctl stop srt-watchdog.timer   2>/dev/null || true
     systemctl stop srt-watchdog.service 2>/dev/null || true
     for s in "${SERVICES[@]}"; do systemctl stop "$s" 2>/dev/null || true; done
 
-    log "Zeroing drive pins for safety."
+    # Zero drive pins for safety
+    log "Zeroing drive pins."
     for f in cw ccw up dn; do
         echo "0" > "$DEST/drive/$f" 2>/dev/null || true
         echo "0" > "$DEST/go/$f"    2>/dev/null || true
@@ -156,12 +188,14 @@ if [ "$EXISTING" -eq 1 ]; then
     apply_fuse_conf
     apply_dropin
 
-    log "Updating scripts"
-    for s in "${SCRIPTS[@]}"; do
-        [ -f "$SCRIPT_DIR/$s" ] && cp "$SCRIPT_DIR/$s" "$DEST/$s" && chmod +x "$DEST/$s"
-    done
+    # Update scripts
+    log "Updating HAL scripts"
+    install_scripts "${HAL_SCRIPTS[@]}"
+    log "Updating control scripts"
+    install_scripts "${CTL_SCRIPTS[@]}"
 
-    for c in "${CHANGED_CFG[@]}"; do
+    # Update config — per-file confirmation to protect local calibration
+    for c in "${CHANGED_CFG[@]+"${CHANGED_CFG[@]}"}"; do
         cf="${c%  \[NEW\]}"
         src="$SCRIPT_DIR/$cf"; dst="$DEST/$cf"
         if [ -f "$dst" ]; then
@@ -173,18 +207,23 @@ if [ "$EXISTING" -eq 1 ]; then
                 log "Kept existing $cf"
             fi
         else
+            mkdir -p "$DEST/$(dirname "$cf")"
             cp "$src" "$dst"; log "Installed new $cf"
         fi
     done
 
+    # Update systemd units
     log "Updating systemd units"
     for u in "${UNITS[@]}"; do
-        [ -f "$SCRIPT_DIR/systemd/$u" ] && cp "$SCRIPT_DIR/systemd/$u" "/etc/systemd/system/$u"
+        [ -f "$SCRIPT_DIR/systemd/$u" ] \
+            && cp "$SCRIPT_DIR/systemd/$u" "/etc/systemd/system/$u"
     done
 
+    # Fix ownership
     chown -R srt:srt "$DEST"
-    chown root:root "$DEST/srt-watchdog"
+    chown root:root "$DEST/control/srt-watchdog"
 
+    # Reload and restart
     log "Reloading systemd and restarting services"
     systemctl daemon-reload
     systemctl enable "${SERVICES[@]}" "$TIMER"
@@ -196,9 +235,9 @@ if [ "$EXISTING" -eq 1 ]; then
     cd /; rm -rf "$SCRIPT_DIR"
     echo ""; echo "[install] ✓ Update complete. Repo directory removed."
 
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # FRESH INSTALL PATH
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 else
     echo ""; echo "  No existing installation found. Fresh install to $DEST"; echo ""
@@ -209,22 +248,25 @@ else
 
     mkdir -p "$DEST"
 
-    log "Copying scripts"
-    for s in "${SCRIPTS[@]}"; do cp "$SCRIPT_DIR/$s" "$DEST/$s" && chmod +x "$DEST/$s"; done
+    log "Installing HAL scripts"
+    install_scripts "${HAL_SCRIPTS[@]}"
+    log "Installing control scripts"
+    install_scripts "${CTL_SCRIPTS[@]}"
 
     log "Copying config"
     cp -r "$SCRIPT_DIR/config" "$DEST/"
 
     log "Installing systemd units"
-    for u in "${UNITS[@]}"; do cp "$SCRIPT_DIR/systemd/$u" "/etc/systemd/system/$u"; done
+    for u in "${UNITS[@]}"; do
+        cp "$SCRIPT_DIR/systemd/$u" "/etc/systemd/system/$u"
+    done
 
     chown -R srt:srt "$DEST"
-    chown root:root "$DEST/srt-watchdog"
+    chown root:root "$DEST/control/srt-watchdog"
 
     log "Enabling and starting services"
     systemctl daemon-reload
     systemctl enable "${SERVICES[@]}" "$TIMER"
-    # Restart rp2040fs first so allow_other takes effect before srt-init runs
     systemctl restart rp2040fs@srt.service
     for s in "${SERVICES[@]}"; do systemctl start "$s"; done
     systemctl start "$TIMER"
@@ -234,22 +276,30 @@ else
     echo ""; echo "[install] ✓ Installation complete. Repo directory removed."
 fi
 
-# ── post-install summary ──────────────────────────────────────────────────────
+# ── summary ───────────────────────────────────────────────────────────────────
 
 echo ""
 echo "  Live files:  $DEST"
+echo "  Layout:"
+echo "    $DEST/hal/         srt-setup  srt-init  srt-go"
+echo "    $DEST/control/     srt-gs232  srt-watchdog"
+echo "    $DEST/config/      pin_map  az_cal  el_cal"
 echo ""
 echo "  Services:"
-echo "    srt-init.service      — pin initialiser + sentinel writer"
-echo "    srt-go.service        — go/ axis controller"
-echo "    srt-watchdog.timer    — health check every 30s"
+echo "    srt-init.service      HAL initialiser + sentinel"
+echo "    srt-go.service        go/ axis controller"
+echo "    srt-gs232.service     GS-232 PTY daemon"
+echo "    srt-watchdog.timer    health check every 30s"
 echo ""
 echo "  Check status:"
-echo "    systemctl status srt-init srt-go srt-watchdog.timer"
+echo "    systemctl status srt-init srt-go srt-gs232 srt-watchdog.timer"
 echo "    journalctl -fu srt-init"
 echo "    journalctl -fu srt-go"
+echo "    journalctl -fu srt-gs232"
 echo "    journalctl -fu srt-watchdog"
 echo ""
 echo "  Quick test once RP2040 is connected:"
 echo "    cat /mnt/srt/enc/az_raw"
 echo "    echo 1 > /mnt/srt/go/cw && sleep 1 && echo 0 > /mnt/srt/go/cw"
+echo "    minicom -D /dev/srt_rotator   # send: C"
+

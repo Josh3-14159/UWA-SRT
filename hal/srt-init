@@ -1,10 +1,14 @@
 #!/bin/bash
-# srt-init — initialises pin state on start, touches /run/srt/ready once the
-#             first srt-setup succeeds, then watches rp2040fs@srt journal for
-#             "Device alive." and re-runs srt-setup on every reconnect.
+# hal/srt-init — runs srt-setup on start, touches /run/srt/ready once the
+#                first setup succeeds, then watches rp2040fs@srt journal for
+#                "Device alive." and re-runs srt-setup on every reconnect.
+#
+# /run/srt/ready is the sentinel that control-layer daemons poll before
+# starting. It is cleared on exit so they always wait for a fresh successful
+# setup after a restart.
 
 SRT=/mnt/srt
-SETUP="$SRT/srt-setup"
+SETUP="$SRT/hal/srt-setup"
 FUSE_SERVICE="rp2040fs@srt.service"
 SENTINEL=/run/srt/ready
 
@@ -25,7 +29,7 @@ log "Starting — running srt-setup for initial state."
 if bash "$SETUP"; then
     log "Initial srt-setup completed successfully."
     touch "$SENTINEL"
-    log "Sentinel written to $SENTINEL — srt-go may now start."
+    log "Sentinel written to $SENTINEL."
 else
     log "WARNING: Initial srt-setup failed — board may not be connected yet."
     log "         Will retry on next 'Device alive.' event."
@@ -45,3 +49,4 @@ journalctl -fu "$FUSE_SERVICE" -o cat | while read -r line; do
         fi
     fi
 done
+

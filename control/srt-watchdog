@@ -1,0 +1,95 @@
+#!/bin/bash
+# control/srt-watchdog — periodic health check fired by srt-watchdog.timer.
+#
+# Checks:
+#   1. srt-go.service and srt-gs232.service are active
+#   2. /mnt/srt/go/ is writable
+#   3. /mnt/srt/drive/ symlinks resolve through to live FUSE files
+#   4. /dev/srt_rotator PTY symlink exists
+#
+# Recovery:
+#   - Filesystem state broken: run srt-setup, restart srt-go and srt-gs232
+#   - Service simply not running: restart it directly
+
+SRT=/mnt/srt
+GO="$SRT/go"
+DRIVE="$SRT/drive"
+SETUP="$SRT/hal/srt-setup"
+SENTINEL=/run/srt/ready
+
+log() { echo "[srt-watchdog] $*"; }
+
+NEEDS_SETUP=0
+NEEDS_RESTART_GO=0
+NEEDS_RESTART_GS232=0
+
+# ── check 1: service states ───────────────────────────────────────────────────
+
+systemctl is-active --quiet srt-go.service || {
+    log "WARN: srt-go.service not active."
+    NEEDS_RESTART_GO=1
+}
+
+systemctl is-active --quiet srt-gs232.service || {
+    log "WARN: srt-gs232.service not active."
+    NEEDS_RESTART_GS232=1
+}
+
+# ── check 2: go/ writable ─────────────────────────────────────────────────────
+
+for f in cw ccw up dn; do
+    [ -f "$GO/$f" ] || { log "WARN: $GO/$f missing."; NEEDS_SETUP=1; break; }
+done
+
+if [ -d "$GO" ] && ! touch "$GO/.watchdog_probe" 2>/dev/null; then
+    log "WARN: $GO not writable."; NEEDS_SETUP=1
+else
+    rm -f "$GO/.watchdog_probe"
+fi
+
+# ── check 3: drive/ symlinks resolve ─────────────────────────────────────────
+
+for f in cw ccw up dn; do
+    { [ -L "$DRIVE/$f" ] && [ -e "$DRIVE/$f" ]; } || {
+        log "WARN: $DRIVE/$f symlink broken."
+        NEEDS_SETUP=1
+        break
+    }
+done
+
+# ── check 4: PTY symlink ──────────────────────────────────────────────────────
+
+[ -e "/dev/srt_rotator" ] || {
+    log "WARN: /dev/srt_rotator missing."
+    NEEDS_RESTART_GS232=1
+}
+
+# ── recovery ──────────────────────────────────────────────────────────────────
+
+if [ "$NEEDS_SETUP" -eq 1 ]; then
+    log "Running srt-setup to recover filesystem state."
+    if bash "$SETUP"; then
+        log "srt-setup completed."
+        touch "$SENTINEL"
+        NEEDS_RESTART_GO=1
+        NEEDS_RESTART_GS232=1
+    else
+        log "ERROR: srt-setup failed — manual intervention required."
+        exit 1
+    fi
+fi
+
+if [ "$NEEDS_RESTART_GO" -eq 1 ]; then
+    log "Restarting srt-go.service."
+    systemctl restart srt-go.service
+fi
+
+if [ "$NEEDS_RESTART_GS232" -eq 1 ]; then
+    log "Restarting srt-gs232.service."
+    systemctl restart srt-gs232.service
+fi
+
+if [ "$NEEDS_SETUP" -eq 0 ] && [ "$NEEDS_RESTART_GO" -eq 0 ] && [ "$NEEDS_RESTART_GS232" -eq 0 ]; then
+    log "All checks passed."
+fi
+

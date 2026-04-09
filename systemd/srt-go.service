@@ -1,5 +1,5 @@
 [Unit]
-Description=SRT go/ axis controller (inotify mutual exclusion daemon)
+Description=SRT HAL go/ axis controller (inotify mutual exclusion daemon)
 After=rp2040fs@srt.service srt-init.service
 BindsTo=rp2040fs@srt.service
 Wants=srt-init.service
@@ -7,7 +7,7 @@ Wants=srt-init.service
 [Service]
 Type=notify
 User=srt
-ExecStart=/mnt/srt/srt-go
+ExecStart=/mnt/srt/hal/srt-go
 Restart=always
 RestartSec=5s
 StartLimitIntervalSec=120
@@ -20,3 +20,4 @@ StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
+

@@ -1,13 +1,36 @@
 # UWA-SRT — Small Radio Telescope Controller
 
-A filesystem abstraction layer for controlling a GS-232-compatible telescope
-rotator using a Waveshare RP2040 Zero exposed via
+A layered filesystem-based controller for a GS-232-compatible telescope
+rotator, using a Waveshare RP2040 Zero exposed via
 [rp2040-gpio-fs](https://github.com/Josh3-14159/rp2040-gpio-fs).
 
-The RP2040 runs the `rp2040-gpio-fs` firmware, which presents its GPIO, ADC,
-and PWM peripherals as a FUSE filesystem at `/mnt/rp2040/`. This layer sits on
-top of that and provides a clean, pin-agnostic interface for higher-level
-software (e.g. a GS-232 daemon talking to SDRangel).
+---
+
+## Architecture
+
+```
+SDRangel
+    |  GS-232 over /dev/srt_rotator (PTY)
+    v
+control/srt-gs232       reads enc/, writes go/
+control/srt-watchdog    health checks, recovery
+
+    |  /mnt/srt/go/  /mnt/srt/enc/
+    v
+hal/srt-go              inotify go/ -> drive/ (mutual exclusion)
+hal/srt-init            journal watcher, re-runs srt-setup on reconnect
+hal/srt-setup           builds /mnt/srt/ from config/pin_map
+
+    |  /mnt/rp2040/gpio/
+    v
+rp2040fs@srt            FUSE filesystem (rp2040-gpio-fs)
+RP2040 Zero hardware
+```
+
+**Layer contract:**
+- `control/` never touches `/mnt/rp2040/` directly
+- `control/` never writes `/mnt/srt/drive/` directly — always via `go/`
+- `hal/` owns everything below `/mnt/srt/go/` and `/mnt/srt/enc/`
 
 ---
 
@@ -22,86 +45,95 @@ software (e.g. a GS-232 daemon talking to SDRangel).
 | Drive UP      | GPIO3  |
 | Drive DN      | GPIO2  |
 
-Pin assignments are defined in `config/pin_map` and can be changed without
-touching any script.
+Pin assignments live in `config/pin_map` and can be changed without touching
+any script.
 
 ---
 
-## Filesystem layout
+## Repository layout
 
-After installation and with the RP2040 connected, `/mnt/srt/` looks like this:
+```
+UWA-SRT/
+├── README.md
+├── install.sh              deploy or update
+│
+├── hal/                    hardware abstraction layer
+│   ├── srt-setup           builds /mnt/srt/ symlinks and initialises pins
+│   ├── srt-init            journal watcher + sentinel writer
+│   └── srt-go              inotify go/ daemon (mutual exclusion)
+│
+├── control/                higher-level control
+│   ├── srt-gs232           GS-232 PTY daemon (Python)
+│   └── srt-watchdog        periodic health check + recovery
+│
+├── config/                 machine-specific constants
+│   ├── pin_map             GPIO assignments
+│   ├── az_cal              azimuth encoder calibration
+│   └── el_cal              elevation encoder calibration
+│
+└── systemd/                all unit files
+    ├── srt-init.service
+    ├── srt-go.service
+    ├── srt-gs232.service
+    ├── srt-watchdog.service
+    ├── srt-watchdog.timer
+    └── rp2040fs@srt.service.d/
+        └── allow_other.conf    FUSE mount override
+```
+
+---
+
+## Filesystem layout at runtime
 
 ```
 /mnt/srt/
+├── hal/            srt-setup  srt-init  srt-go    (scripts)
+├── control/        srt-gs232  srt-watchdog
+├── config/         pin_map  az_cal  el_cal
+│
 ├── enc/
-│   ├── az_raw      → /mnt/rp2040/gpio/gpio26/value  (ADC raw counts + volts)
-│   └── el_raw      → /mnt/rp2040/gpio/gpio27/value
+│   ├── az_raw  ->  /mnt/rp2040/gpio/gpio26/value
+│   └── el_raw  ->  /mnt/rp2040/gpio/gpio27/value
 │
 ├── drive/
-│   ├── cw          → /mnt/rp2040/gpio/gpio5/value   (write 0 or 1)
-│   ├── ccw         → /mnt/rp2040/gpio/gpio4/value
-│   ├── up          → /mnt/rp2040/gpio/gpio3/value
-│   └── dn          → /mnt/rp2040/gpio/gpio2/value
+│   ├── cw      ->  /mnt/rp2040/gpio/gpio5/value
+│   ├── ccw     ->  /mnt/rp2040/gpio/gpio4/value
+│   ├── up      ->  /mnt/rp2040/gpio/gpio3/value
+│   └── dn      ->  /mnt/rp2040/gpio/gpio2/value
 │
-├── go/                                               (write 0 or 1 here)
-│   ├── cw
-│   ├── ccw
-│   ├── up
-│   └── dn
-│
-└── config/
-    ├── pin_map     (GPIO assignments — source of truth)
-    ├── az_cal      (azimuth encoder calibration constants)
-    └── el_cal      (elevation encoder calibration constants)
+└── go/             cw  ccw  up  dn   (write 0 or 1)
 ```
 
-### enc/
-
-Symlinks directly to the FUSE ADC value files. Reading returns the raw format
-from the firmware: `2048 1.6504` (raw 12-bit count and voltage). Higher-level
-software is responsible for converting to degrees using the constants in
-`config/az_cal` and `config/el_cal`.
-
-### drive/
-
-Symlinks to the FUSE GPIO output value files. Writing `1` or `0` directly
-drives the motor controller pins. No mutual exclusion is enforced here — use
-`go/` instead.
-
-### go/
-
-Plain files backed by the `srt-go` daemon. Writing `1` or `0` to a file here
-is the recommended way to command motion:
+### go/ interface
 
 ```bash
-echo 1 > /mnt/srt/go/cw      # start slewing clockwise
+echo 1 > /mnt/srt/go/cw      # slew clockwise
 echo 0 > /mnt/srt/go/cw      # stop
 echo 0 > /mnt/srt/go/*       # stop all axes
 ```
 
-**Mutual exclusion is enforced per axis:**
-- `cw` and `ccw` are exclusive — writing `1` to one automatically zeros the other
-- `up` and `dn` are exclusive — same behaviour
-- Az and El axes are independent — both may slew simultaneously
-
-Reading a `go/` file returns the current commanded state (`0` or `1`).
+Mutual exclusion is enforced by `srt-go`:
+- `cw` / `ccw` are exclusive — writing `1` to one zeros the other
+- `up` / `dn` are exclusive — same
+- Az and El are independent — both axes may slew simultaneously
 
 ---
 
 ## Dependencies
 
 - [rp2040-gpio-fs](https://github.com/Josh3-14159/rp2040-gpio-fs) firmware
-  flashed and FUSE daemon installed (`rp2040fs@srt.service` running)
-- `inotify-tools` (`sudo apt install inotify-tools`)
-- A `srt` system user (`sudo useradd --system --no-create-home srt`)
+  flashed, FUSE daemon built and installed
+- `inotify-tools` — `sudo apt install inotify-tools`
+- `python3` — `sudo apt install python3`
+- A `srt` system user — `sudo useradd --system --no-create-home srt`
 
 ---
 
 ## Installation
 
 ```bash
-# 1. Install dependencies
-sudo apt install inotify-tools
+# 1. One-time prerequisites
+sudo apt install inotify-tools python3
 sudo useradd --system --no-create-home srt
 
 # 2. Clone and install
@@ -112,17 +144,15 @@ sudo bash install.sh
 
 `install.sh` will:
 - Uncomment `user_allow_other` in `/etc/fuse.conf`
-- Install a systemd drop-in for `rp2040fs@srt` that adds `-o allow_other`
-- Copy all files to `/mnt/srt/`
-- Install and enable all systemd services and the watchdog timer
-- Set correct ownership
-- Delete the cloned repo directory (the live copy lives at `/mnt/srt/`)
+- Install a drop-in override for `rp2040fs@srt` that adds `-o allow_other`
+- Copy all files to `/mnt/srt/` preserving `hal/` and `control/` structure
+- Install and enable all systemd units
+- Set ownership to `srt:srt` (watchdog runs as root)
+- Delete the cloned repo directory
 
 ---
 
 ## Updating
-
-Pull the repo and re-run `install.sh`:
 
 ```bash
 git clone https://github.com/<org>/UWA-SRT.git
@@ -130,10 +160,9 @@ cd UWA-SRT
 sudo bash install.sh
 ```
 
-The installer detects the existing installation, shows a diff of what has
-changed, and asks for confirmation before proceeding. Config files (calibration,
-pin map) are updated individually with per-file confirmation so local changes
-are not accidentally overwritten.
+The installer detects the existing install, shows a diff, and asks for
+confirmation. Config files are updated with per-file confirmation so local
+calibration changes are not accidentally overwritten.
 
 ---
 
@@ -141,58 +170,55 @@ are not accidentally overwritten.
 
 | Service | Role |
 |---|---|
-| `rp2040fs@srt` | FUSE mount — from rp2040-gpio-fs, managed by udev |
-| `srt-init` | Runs `srt-setup` at start and on every `Device alive.` reconnect. Touches `/run/srt/ready` after first successful setup. |
-| `srt-go` | inotify daemon — waits for `/run/srt/ready`, enforces mutual exclusion, proxies `go/` → `drive/` |
+| `rp2040fs@srt` | FUSE mount — rp2040-gpio-fs, managed by udev |
+| `srt-init` | Runs `srt-setup` at start and on every `Device alive.` reconnect |
+| `srt-go` | inotify daemon — mutual exclusion, proxies `go/` to `drive/` |
+| `srt-gs232` | GS-232 PTY daemon — SDRangel connects to `/dev/srt_rotator` |
 | `srt-watchdog.timer` | Fires `srt-watchdog` every 30s |
-| `srt-watchdog` | Health check — verifies `go/`, `drive/`, and `srt-go`; recovers if broken |
+| `srt-watchdog` | Health check — recovers broken filesystem or stopped services |
 
 ```bash
-# Check status
-systemctl status srt-init srt-go srt-watchdog.timer
-
-# Watch logs
+systemctl status srt-init srt-go srt-gs232 srt-watchdog.timer
 journalctl -fu srt-init
 journalctl -fu srt-go
+journalctl -fu srt-gs232
 journalctl -fu srt-watchdog
 ```
 
-### Start-up ordering
+### Startup ordering
 
-`srt-init` runs `srt-setup` immediately on start. Once the first successful
-setup completes it touches `/run/srt/ready`. `srt-go` polls for this file
-before starting its inotify loop, so it never races against an incomplete
-`srt-setup`.
+`srt-init` writes `/run/srt/ready` after the first successful `srt-setup`.
+Both `srt-go` and `srt-gs232` poll for this file before starting, so nothing
+races against an incomplete hardware initialisation.
 
-### Keep-alive and watchdog behaviour
+### Keep-alives
 
-`srt-go` sends a `WATCHDOG=1` ping to systemd every 10 seconds. If systemd
-receives no ping within 30 seconds it kills and restarts the service
-automatically.
-
-`srt-watchdog.timer` fires every 30 seconds and checks that `go/` is writable,
-`drive/` symlinks resolve, and `srt-go` is active. If anything is broken it
-runs `srt-setup` to recover the filesystem state and restarts `srt-go`.
-
-Both `srt-init` and `srt-go` use `Restart=always` with a 5-second back-off,
-allowing up to 10 restarts per 2-minute window before systemd marks the service
-as failed.
+`srt-go` pings systemd every 10s via `WATCHDOG=1`. If no ping is received
+within 30s, systemd kills and restarts it. Both `srt-init` and `srt-go` use
+`Restart=always` with a 5s back-off and a burst limit of 10 restarts per 2
+minutes. `srt-watchdog` additionally checks filesystem and PTY state every 30s
+and triggers recovery if anything is broken.
 
 ---
 
 ## Reconfiguring pins
 
-Edit `/mnt/srt/config/pin_map` then run:
+Edit `/mnt/srt/config/pin_map` and replug the RP2040, or run:
 
 ```bash
-sudo -u srt bash /mnt/srt/srt-setup
+sudo -u srt bash /mnt/srt/hal/srt-setup
 ```
-
-Or replug the RP2040 — `srt-init` calls `srt-setup` automatically on reconnect.
-
----
 
 ## Calibration
 
-Edit `/mnt/srt/config/az_cal` and `/mnt/srt/config/el_cal`. Changes are picked
-up by the GS-232 daemon on the next reconnect or daemon restart.
+Edit `/mnt/srt/config/az_cal` or `/mnt/srt/config/el_cal`. `srt-gs232` reads
+calibration on every position conversion so changes take effect immediately
+with no restart required.
+
+## SDRangel setup
+
+In SDRangel, configure the rotator controller:
+- **Type:** GS-232
+- **Device:** `/dev/srt_rotator`
+- **Baud rate:** 9600 (any value — PTY ignores baud)
+

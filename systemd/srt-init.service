@@ -1,5 +1,5 @@
 [Unit]
-Description=SRT pin initialiser (runs srt-setup on start and on every RP2040 reconnect)
+Description=SRT HAL initialiser (runs srt-setup on start and on every RP2040 reconnect)
 After=rp2040fs@srt.service
 BindsTo=rp2040fs@srt.service
 
@@ -8,7 +8,7 @@ Type=simple
 User=srt
 RuntimeDirectory=srt
 RuntimeDirectoryMode=0755
-ExecStart=/mnt/srt/srt-init
+ExecStart=/mnt/srt/hal/srt-init
 Restart=always
 RestartSec=5s
 StartLimitIntervalSec=120
@@ -18,3 +18,4 @@ StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
+

@@ -1,7 +1,11 @@
 #!/bin/bash
-# srt-setup — build the /mnt/srt abstraction layer from config/pin_map.
-# Called by srt-init on start and on every "Device alive." event.
+# hal/srt-setup — build the /mnt/srt abstraction layer from config/pin_map.
+# Called by hal/srt-init on start and on every "Device alive." event.
 # Can also be run manually after editing config/pin_map.
+#
+# Reads:  /mnt/srt/config/pin_map
+# Writes: /mnt/srt/enc/*, /mnt/srt/drive/*, /mnt/srt/go/*
+# Touches: /mnt/rp2040/gpio/*/mode and /mnt/rp2040/gpio/*/value directly
 
 RP2040_FS=/mnt/rp2040
 SRT=/mnt/srt
@@ -71,3 +75,4 @@ for DIR in cw ccw up dn; do
 done
 
 log "srt-setup complete."
+

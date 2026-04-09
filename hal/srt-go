@@ -1,13 +1,19 @@
 #!/bin/bash
-# srt-go — watches go/ for writes, enforces per-axis mutual exclusion,
-#           and proxies the result to drive/ symlinks.
+# hal/srt-go — watches /mnt/srt/go/ for writes, enforces per-axis mutual
+#              exclusion, and proxies commands to /mnt/srt/drive/ symlinks.
 #
-# Waits for /run/srt/ready before starting. Sends WATCHDOG=1 keepalives
-# to systemd every $WATCHDOG_PING seconds.
+# Waits for /run/srt/ready before starting.
+# Sends WATCHDOG=1 keepalives to systemd every $WATCHDOG_PING seconds.
 #
-# Az axis:  cw  and ccw  are exclusive — writing 1 to one zeros the other
-# El axis:  up  and dn   are exclusive — writing 1 to one zeros the other
-# Az and El are fully independent — both axes may slew simultaneously.
+# Mutual exclusion:
+#   Az axis:  cw  and ccw  are exclusive
+#   El axis:  up  and dn   are exclusive
+#   Az and El are fully independent — both axes may slew simultaneously.
+#
+# Usage:
+#   echo 1 > /mnt/srt/go/cw       start slewing CW
+#   echo 0 > /mnt/srt/go/cw       stop CW
+#   echo 0 > /mnt/srt/go/*        stop all
 
 SRT=/mnt/srt
 GO="$SRT/go"
@@ -85,7 +91,7 @@ apply_axis() {
     if [[ "$val" == "1" ]]; then
         echo "0" > "$DRIVE/$opp"
         echo "0" > "$GO/$opp"
-        log "$req=1 → zeroed $opp"
+        log "$req=1 — zeroed $opp"
     fi
 
     echo "$val" > "$DRIVE/$req"
@@ -103,3 +109,4 @@ inotifywait -m -q -e close_write --format '%f' "$GO" | while read -r filename; d
         *)      log "WARN: ignored write to unknown file go/$filename" ;;
     esac
 done
+

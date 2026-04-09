@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""
+control/srt-gs232 - GS-232 rotator controller daemon for the UWA Small Radio Telescope.
+
+Exposes a virtual serial port (PTY) at /dev/srt_rotator that SDRangel (or any
+GS-232 client) connects to. Reads encoder positions via the HAL filesystem at
+/mnt/srt/enc/, drives motors via /mnt/srt/go/, and waits for /run/srt/ready
+before starting.
+
+Layer contract:
+  - Never reads /mnt/rp2040/ directly (HAL boundary)
+  - Never writes /mnt/srt/drive/ directly (go/ enforces mutual exclusion)
+
+Supported GS-232 commands:
+    C       - report current az/el position
+    Mxxx    - slew to azimuth xxx (degrees, zero-padded 3 digits)
+    Wxxxyyy - slew to azimuth xxx, elevation yyy
+"""
+
+import os
+import sys
+import pty
+import tty
+import math
+import time
+import signal
+import logging
+
+# ── paths ─────────────────────────────────────────────────────────────────────
+
+SRT      = "/mnt/srt"
+GO       = f"{SRT}/go"
+ENC      = f"{SRT}/enc"
+CONFIG   = f"{SRT}/config"
+SENTINEL = "/run/srt/ready"
+PTY_LINK = "/dev/srt_rotator"
+
+AZ_RAW   = f"{ENC}/az_raw"
+EL_RAW   = f"{ENC}/el_raw"
+AZ_CAL   = f"{CONFIG}/az_cal"
+EL_CAL   = f"{CONFIG}/el_cal"
+
+GO_CW    = f"{GO}/cw"
+GO_CCW   = f"{GO}/ccw"
+GO_UP    = f"{GO}/up"
+GO_DN    = f"{GO}/dn"
+
+# ── tuning ────────────────────────────────────────────────────────────────────
+
+LOOP_INTERVAL    = 0.1   # seconds between control loop iterations
+TOLERANCE        = 0.4   # degrees — bang-bang dead band
+SENTINEL_TIMEOUT = 60    # seconds to wait for /run/srt/ready
+
+# ── logging ───────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[srt-gs232] %(levelname)s %(message)s",
+    stream=sys.stdout,
+)
+log = logging.getLogger("srt-gs232")
+
+# ── calibration ───────────────────────────────────────────────────────────────
+
+def read_cal(path):
+    """Parse a key = value calibration file, ignoring comment lines."""
+    cal = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, _, val = line.partition("=")
+            cal[key.strip()] = float(val.strip())
+    return cal
+
+
+def enc2az(raw):
+    cal = read_cal(AZ_CAL)
+    return (raw - cal["enc_min"]) * cal["deg_range"] / (cal["enc_max"] - cal["enc_min"])
+
+
+def enc2el(raw):
+    cal = read_cal(EL_CAL)
+    enc = 65536 - raw
+    enc -= (65536 - 56237)
+    length = enc * 430 / (cal["enc_max"] - cal["enc_min"]) + cal["link_min"]
+    b, c = cal["arm_b"], cal["arm_c"]
+    cos_angle = (b**2 + c**2 - 60**2 - length**2) / (2 * b * c)
+    cos_angle = max(-1.0, min(1.0, cos_angle))
+    ang = math.acos(cos_angle)
+    return 180 - cal["offset"] - ang * 180 / math.pi
+
+# ── encoder reads ─────────────────────────────────────────────────────────────
+
+def read_raw(path):
+    """Read an ADC value file — returns the raw 12-bit count (first token)."""
+    with open(path) as f:
+        return float(f.read().split()[0])
+
+
+def read_az():
+    return enc2az(read_raw(AZ_RAW))
+
+
+def read_el():
+    return enc2el(read_raw(EL_RAW))
+
+# ── motor control ─────────────────────────────────────────────────────────────
+
+def write_go(path, value):
+    with open(path, "w") as f:
+        f.write(str(value))
+
+
+def stop_all():
+    for p in (GO_CW, GO_CCW, GO_UP, GO_DN):
+        write_go(p, 0)
+
+
+def control_loop(set_az, set_el):
+    """
+    Single bang-bang control iteration.
+    Opposite pin is always zeroed before the requested pin is asserted.
+    Returns True when both axes are within tolerance.
+    """
+    az = read_az()
+    el = read_el()
+
+    # Azimuth
+    if set_az > az + TOLERANCE:
+        write_go(GO_CCW, 0)
+        write_go(GO_CW, 1)
+    elif set_az < az - TOLERANCE:
+        write_go(GO_CW, 0)
+        write_go(GO_CCW, 1)
+    else:
+        write_go(GO_CW, 0)
+        write_go(GO_CCW, 0)
+
+    # Elevation
+    if set_el > el + TOLERANCE:
+        write_go(GO_DN, 0)
+        write_go(GO_UP, 1)
+    elif set_el < el - TOLERANCE:
+        write_go(GO_UP, 0)
+        write_go(GO_DN, 1)
+    else:
+        write_go(GO_UP, 0)
+        write_go(GO_DN, 0)
+
+    return abs(set_az - az) <= TOLERANCE and abs(set_el - el) <= TOLERANCE
+
+# ── GS-232 protocol ───────────────────────────────────────────────────────────
+
+def format_position():
+    """Return GS-232 C response: AZ=xxx EL=xxx\r\n"""
+    az = read_az()
+    el = read_el()
+    return f"AZ={round(az):03d} EL={round(el):03d}\r\n"
+
+
+def parse_command(cmd):
+    """
+    Parse a GS-232 command string. Returns a tuple or None.
+      ("report",)
+      ("goto_az",   az)
+      ("goto_azel", az, el)
+    """
+    cmd = cmd.strip()
+    if not cmd:
+        return None
+    c = cmd[0].upper()
+    if c == "C":
+        return ("report",)
+    if c == "M":
+        try:
+            return ("goto_az", int(cmd[1:4]))
+        except (ValueError, IndexError):
+            log.warning("Malformed M command: %r", cmd)
+            return None
+    if c == "W":
+        try:
+            return ("goto_azel", int(cmd[1:4]), int(cmd[5:8]))
+        except (ValueError, IndexError):
+            log.warning("Malformed W command: %r", cmd)
+            return None
+    log.debug("Unrecognised command: %r", cmd)
+    return None
+
+# ── PTY ───────────────────────────────────────────────────────────────────────
+
+def create_pty():
+    master_fd, slave_fd = pty.openpty()
+    tty.setraw(slave_fd)
+    return master_fd, slave_fd
+
+
+def symlink_pty(slave_fd):
+    slave_path = os.ttyname(slave_fd)
+    try:
+        os.unlink(PTY_LINK)
+    except FileNotFoundError:
+        pass
+    os.symlink(slave_path, PTY_LINK)
+    log.info("PTY: %s -> %s", PTY_LINK, slave_path)
+
+# ── sentinel wait ─────────────────────────────────────────────────────────────
+
+def wait_for_sentinel():
+    log.info("Waiting for %s ...", SENTINEL)
+    elapsed = 0
+    while not os.path.exists(SENTINEL):
+        if elapsed >= SENTINEL_TIMEOUT:
+            log.error("Timed out after %ds. Check: journalctl -u srt-init", SENTINEL_TIMEOUT)
+            sys.exit(1)
+        time.sleep(1)
+        elapsed += 1
+    log.info("Sentinel found after %ds.", elapsed)
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    wait_for_sentinel()
+
+    master_fd, slave_fd = create_pty()
+    symlink_pty(slave_fd)
+
+    try:
+        set_az = read_az()
+        set_el = read_el()
+    except Exception as e:
+        log.error("Failed to read initial position: %s", e)
+        sys.exit(1)
+
+    log.info("Initial position: AZ=%.1f EL=%.1f", set_az, set_el)
+    log.info("Listening on %s", PTY_LINK)
+
+    running = True
+
+    def shutdown(sig, frame):
+        nonlocal running
+        log.info("Signal %d — shutting down.", sig)
+        running = False
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT,  shutdown)
+
+    buf = ""
+
+    try:
+        while running:
+            # Read pending bytes from PTY master (non-blocking)
+            try:
+                os.set_blocking(master_fd, False)
+                data = os.read(master_fd, 256)
+                buf += data.decode("ascii", errors="ignore")
+            except BlockingIOError:
+                pass
+            except OSError:
+                pass  # client disconnected — keep running
+
+            # Process complete commands
+            while "\r" in buf or "\n" in buf:
+                for sep in ("\r\n", "\r", "\n"):
+                    if sep in buf:
+                        cmd, buf = buf.split(sep, 1)
+                        break
+
+                parsed = parse_command(cmd)
+                if parsed is None:
+                    continue
+
+                if parsed[0] == "report":
+                    resp = format_position()
+                    log.info("C -> %s", resp.strip())
+                    os.write(master_fd, resp.encode())
+
+                elif parsed[0] == "goto_az":
+                    set_az = float(parsed[1])
+                    log.info("M -> az=%.1f", set_az)
+
+                elif parsed[0] == "goto_azel":
+                    set_az = float(parsed[1])
+                    set_el = float(parsed[2])
+                    log.info("W -> az=%.1f el=%.1f", set_az, set_el)
+
+            # Control loop
+            try:
+                control_loop(set_az, set_el)
+            except Exception as e:
+                log.error("Control loop error: %s", e)
+                stop_all()
+
+            time.sleep(LOOP_INTERVAL)
+
+    finally:
+        log.info("Stopping all motors.")
+        try:
+            stop_all()
+        except Exception:
+            pass
+        try:
+            os.unlink(PTY_LINK)
+        except FileNotFoundError:
+            pass
+        os.close(master_fd)
+        os.close(slave_fd)
+        log.info("Shutdown complete.")
+
+
+if __name__ == "__main__":
+    main()
+

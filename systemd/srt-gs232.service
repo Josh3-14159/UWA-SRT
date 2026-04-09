@@ -1,0 +1,21 @@
+[Unit]
+Description=SRT GS-232 rotator daemon (virtual serial port for SDRangel)
+After=rp2040fs@srt.service srt-init.service srt-go.service
+BindsTo=rp2040fs@srt.service
+Wants=srt-init.service srt-go.service
+
+[Service]
+Type=simple
+User=srt
+ExecStart=/usr/bin/python3 /mnt/srt/control/srt-gs232
+Restart=always
+RestartSec=5s
+StartLimitIntervalSec=120
+StartLimitBurst=10
+TimeoutStartSec=60s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
