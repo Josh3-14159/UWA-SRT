@@ -1,0 +1,13 @@
+[Unit]
+Description=SRT rotator PTY symlink in /dev
+After=srt-gs232.service
+BindsTo=srt-gs232.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'for i in $(seq 1 20); do [ -e /run/srt/rotator ] && ln -sf /run/srt/rotator /dev/srt_rotator && exit 0; sleep 1; done; exit 1'
+ExecStop=/bin/rm -f /dev/srt_rotator
+
+[Install]
+WantedBy=multi-user.target

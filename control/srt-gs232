@@ -210,13 +210,18 @@ def symlink_pty(slave_fd):
 def wait_for_sentinel():
     log.info("Waiting for %s ...", SENTINEL)
     elapsed = 0
-    while not os.path.exists(SENTINEL):
+    while True:
+        try:
+            if os.path.exists(SENTINEL):
+                log.info("Sentinel found after %ds.", elapsed)
+                return
+        except OSError:
+            pass
         if elapsed >= SENTINEL_TIMEOUT:
             log.error("Timed out after %ds. Check: journalctl -u srt-init", SENTINEL_TIMEOUT)
             sys.exit(1)
         time.sleep(1)
         elapsed += 1
-    log.info("Sentinel found after %ds.", elapsed)
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
