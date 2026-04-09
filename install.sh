@@ -254,7 +254,9 @@ else
     install_scripts "${CTL_SCRIPTS[@]}"
 
     log "Copying config"
-    cp "$SCRIPT_DIR/config/*" "$DEST/config/"
+    cp "$SCRIPT_DIR/config/pin_map" "$DEST/config/"
+    cp "$SCRIPT_DIR/config/az_cal"  "$DEST/config/"
+    cp "$SCRIPT_DIR/config/el_cal"  "$DEST/config/"
     
     log "Installing systemd units"
     for u in "${UNITS[@]}"; do
