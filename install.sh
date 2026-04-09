@@ -228,7 +228,7 @@ if [ "$EXISTING" -eq 1 ]; then
     systemctl daemon-reload
     systemctl enable "${SERVICES[@]}" "$TIMER"
     systemctl restart rp2040fs@srt.service
-    for s in "${SERVICES[@]}"; do systemctl restart "$s"; done
+    for s in "${SERVICES[@]}"; do systemctl restart --no-block "$s"; done
     systemctl restart "$TIMER"
 
     log "Cleaning up repo directory"
@@ -270,7 +270,7 @@ else
     systemctl daemon-reload
     systemctl enable "${SERVICES[@]}" "$TIMER"
     systemctl restart rp2040fs@srt.service
-    for s in "${SERVICES[@]}"; do systemctl start "$s"; done
+    for s in "${SERVICES[@]}"; do systemctl start --no-block "$s"; done
     systemctl start "$TIMER"
 
     log "Removing repo directory"
