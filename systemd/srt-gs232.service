@@ -10,13 +10,11 @@ User=srt
 RuntimeDirectory=srt
 RuntimeDirectoryMode=0755
 ExecStart=/usr/bin/python3 /mnt/srt/control/srt-gs232
-ExecStartPost=-/bin/bash -c 'for i in $(seq 1 10); do [ -e /run/srt/rotator ] && ln -sf /run/srt/rotator /dev/srt_rotator && exit 0; sleep 1; done; exit 1'
-ExecStopPost=/bin/rm -f /dev/srt_rotator
 Restart=always
 RestartSec=5s
 StartLimitIntervalSec=120
 StartLimitBurst=10
-TimeoutStartSec=120s
+TimeoutStartSec=60s
 StandardOutput=journal
 StandardError=journal
 
