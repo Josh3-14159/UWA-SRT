@@ -14,10 +14,9 @@ Restart=always
 RestartSec=5s
 StartLimitIntervalSec=120
 StartLimitBurst=10
-TimeoutStartSec=60s
+TimeoutStartSec=120s
 StandardOutput=journal
 StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-

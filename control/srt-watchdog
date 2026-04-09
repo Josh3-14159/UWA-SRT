@@ -30,10 +30,11 @@ systemctl is-active --quiet srt-go.service || {
     NEEDS_RESTART_GO=1
 }
 
-systemctl is-active --quiet srt-gs232.service || {
-    log "WARN: srt-gs232.service not active."
-    NEEDS_RESTART_GS232=1
-}
+# srt-gs232 manages its own restart via systemd Restart=always
+# systemctl is-active --quiet srt-gs232.service || {
+#     log "WARN: srt-gs232.service not active."
+#     NEEDS_RESTART_GS232=1
+# }
 
 # ── check 2: go/ writable ─────────────────────────────────────────────────────
 
@@ -41,10 +42,8 @@ for f in cw ccw up dn; do
     [ -f "$GO/$f" ] || { log "WARN: $GO/$f missing."; NEEDS_SETUP=1; break; }
 done
 
-if [ -d "$GO" ] && ! touch "$GO/.watchdog_probe" 2>/dev/null; then
+if [ ! -w "$GO" ]; then
     log "WARN: $GO not writable."; NEEDS_SETUP=1
-else
-    rm -f "$GO/.watchdog_probe"
 fi
 
 # ── check 3: drive/ symlinks resolve ─────────────────────────────────────────

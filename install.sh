@@ -20,10 +20,10 @@ DROPIN_DST="$DROPIN_DIR/allow_other.conf"
 HAL_SCRIPTS=(hal/srt-setup hal/srt-init hal/srt-go)
 CTL_SCRIPTS=(control/srt-gs232 control/srt-watchdog)
 CONFIGS=(config/pin_map config/az_cal config/el_cal)
-UNITS=(srt-init.service srt-go.service srt-gs232.service srt-watchdog.service srt-watchdog.timer)
+UNITS=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service srt-watchdog.service srt-watchdog.timer)
 
 # Services to start/stop (not the timer — handled separately)
-SERVICES=(srt-init.service srt-go.service srt-gs232.service)
+SERVICES=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service)
 TIMER=srt-watchdog.timer
 
 log()  { echo "[install] $*"; }
@@ -124,13 +124,10 @@ if [ "$EXISTING" -eq 1 ]; then
 
     mapfile -t CHANGED_S   < <(changed_files "$SCRIPT_DIR" "$DEST"               "${ALL_SCRIPTS[@]}")
     mapfile -t CHANGED_CFG < <(changed_files "$SCRIPT_DIR" "$DEST"               "${CONFIGS[@]}")
-    mapfile -t CHANGED_U   < <(changed_files "$SCRIPT_DIR/systemd" "/etc/systemd/system" "${UNITS[@]}")
-
-    DROPIN_CHANGED=0
-    { [ ! -f "$DROPIN_DST" ] || ! diff -q "$DROPIN_SRC" "$DROPIN_DST" &>/dev/null; } \
+    mapfile -t CHANGED_U   < <(changed_files "$SCRIPT_DIR/systemd" "/etc/systemd/system" "${UNITS=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service srt-watchdog.service srt-watchdog.timer)[ ! -f "$DROPIN_DST" ] || ! diff -q "$DROPIN_SRC" "$DROPIN_DST" &>/dev/null; } \
         && DROPIN_CHANGED=1
 
-    TOTAL=$(( ${#CHANGED_S[@]} + ${#CHANGED_CFG[@]} + ${#CHANGED_U[@]} + DROPIN_CHANGED ))
+    TOTAL=$(( ${#CHANGED_S[@]}SERVICES=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service)${#CHANGED_U[@]} + DROPIN_CHANGED ))
 
     if [ "$TOTAL" -eq 0 ]; then
         echo "  No changes detected — installed files match repo."
@@ -138,12 +135,10 @@ if [ "$EXISTING" -eq 1 ]; then
         confirm "  Force reinstall anyway?" || { echo "  Aborted."; exit 0; }
         mapfile -t CHANGED_S   < <(printf '%s\n' "${ALL_SCRIPTS[@]}")
         mapfile -t CHANGED_CFG < <(printf '%s\n' "${CONFIGS[@]}")
-        mapfile -t CHANGED_U   < <(printf '%s\n' "${UNITS[@]}")
-        DROPIN_CHANGED=1
-    else
+        mapfile -t CHANGED_U   < <(printf '%s\n' "${UNITS=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service srt-watchdog.service srt-watchdog.timer)
         echo "  The following will be updated:"
         echo ""
-        for f in "${CHANGED_S[@]+"${CHANGED_S[@]}"}";   do echo "    $f"; done
+        for f in "SERVICES=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service)"    $f"; done
         for f in "${CHANGED_CFG[@]+"${CHANGED_CFG[@]}"}"; do echo "    $f"; done
         for f in "${CHANGED_U[@]+"${CHANGED_U[@]}"}";   do echo "    systemd/$f"; done
         [ "$DROPIN_CHANGED" -eq 1 ] \
@@ -160,11 +155,10 @@ if [ "$EXISTING" -eq 1 ]; then
                 src="$SCRIPT_DIR/$c"; dst="$DEST/$c"
                 [ -f "$src" ] && [ -f "$dst" ] && diff --color=always -u "$dst" "$src" || true
             done
-            for u in "${UNITS[@]}"; do
-                src="$SCRIPT_DIR/systemd/$u"; dst="/etc/systemd/system/$u"
+            for u in "${UNITS=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service srt-watchdog.service srt-watchdog.timer)
                 [ -f "$src" ] && [ -f "$dst" ] && diff --color=always -u "$dst" "$src" || true
             done
-            [ "$DROPIN_CHANGED" -eq 1 ] && [ -f "$DROPIN_DST" ] \
+     SERVICES=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service)-eq 1 ] && [ -f "$DROPIN_DST" ] \
                 && diff --color=always -u "$DROPIN_DST" "$DROPIN_SRC" || true
             echo ""
         fi
@@ -214,10 +208,8 @@ if [ "$EXISTING" -eq 1 ]; then
 
     # Update systemd units
     log "Updating systemd units"
-    for u in "${UNITS[@]}"; do
-        [ -f "$SCRIPT_DIR/systemd/$u" ] \
-            && cp "$SCRIPT_DIR/systemd/$u" "/etc/systemd/system/$u"
-    done
+    for u in "${UNITS=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service srt-watchdog.service srt-watchdog.timer)"$SCRIPT_DIR/systemd/$u" ] \
+            && cpSERVICES=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service)done
 
     # Fix ownership
     chown -R srt:srt "$DEST"
@@ -259,9 +251,7 @@ else
     cp "$SCRIPT_DIR/config/el_cal"  "$DEST/config/"
     
     log "Installing systemd units"
-    for u in "${UNITS[@]}"; do
-        cp "$SCRIPT_DIR/systemd/$u" "/etc/systemd/system/$u"
-    done
+    for u in "${UNITS=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service srt-watchdog.service srt-watchdog.timer)"/eSERVICES=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service)
 
     chown -R srt:srt "$DEST"
     chown root:root "$DEST/control/srt-watchdog"
