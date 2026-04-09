@@ -246,7 +246,7 @@ else
     apply_fuse_conf
     apply_dropin
 
-    mkdir -p "$DEST"
+    mkdir -p "$DEST/config"
 
     log "Installing HAL scripts"
     install_scripts "${HAL_SCRIPTS[@]}"
@@ -254,8 +254,8 @@ else
     install_scripts "${CTL_SCRIPTS[@]}"
 
     log "Copying config"
-    cp -r "$SCRIPT_DIR/config" "$DEST/"
-
+    cp "$SCRIPT_DIR/config/*" "$DEST/config/"
+    
     log "Installing systemd units"
     for u in "${UNITS[@]}"; do
         cp "$SCRIPT_DIR/systemd/$u" "/etc/systemd/system/$u"
