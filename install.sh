@@ -20,10 +20,20 @@ DROPIN_DST="$DROPIN_DIR/allow_other.conf"
 HAL_SCRIPTS=(hal/srt-setup hal/srt-init hal/srt-go)
 CTL_SCRIPTS=(control/srt-gs232 control/srt-watchdog)
 CONFIGS=(config/pin_map config/az_cal config/el_cal)
-UNITS=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service srt-watchdog.service srt-watchdog.timer)
-
-# Services to start/stop (not the timer — handled separately)
-SERVICES=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service)
+UNITS=(
+    srt-init.service
+    srt-go.service
+    srt-gs232.service
+    srt-gs232-dev.service
+    srt-watchdog.service
+    srt-watchdog.timer
+)
+SERVICES=(
+    srt-init.service
+    srt-go.service
+    srt-gs232.service
+    srt-gs232-dev.service
+)
 TIMER=srt-watchdog.timer
 
 log()  { echo "[install] $*"; }
@@ -76,7 +86,7 @@ apply_dropin() {
     fi
 }
 
-# ── copy a set of scripts to dest, preserving subdir structure ────────────────
+# ── install a set of scripts preserving subdir structure ──────────────────────
 
 install_scripts() {
     local scripts=("$@")
@@ -88,10 +98,18 @@ install_scripts() {
     done
 }
 
-# ── detect changed files ──────────────────────────────────────────────────────
+# ── copy config files individually (avoids cp -r directory confusion) ─────────
+
+install_config() {
+    mkdir -p "$DEST/config"
+    for f in "${CONFIGS[@]}"; do
+        cp "$SCRIPT_DIR/$f" "$DEST/$f"
+    done
+}
+
+# ── detect changed files between src and dst ──────────────────────────────────
 
 changed_files() {
-    # Usage: changed_files src_prefix dst_prefix file1 file2 ...
     local src_pfx="$1" dst_pfx="$2"
     shift 2
     local changed=()
@@ -122,12 +140,15 @@ if [ "$EXISTING" -eq 1 ]; then
 
     ALL_SCRIPTS=("${HAL_SCRIPTS[@]}" "${CTL_SCRIPTS[@]}")
 
-    mapfile -t CHANGED_S   < <(changed_files "$SCRIPT_DIR" "$DEST"               "${ALL_SCRIPTS[@]}")
-    mapfile -t CHANGED_CFG < <(changed_files "$SCRIPT_DIR" "$DEST"               "${CONFIGS[@]}")
-    mapfile -t CHANGED_U   < <(changed_files "$SCRIPT_DIR/systemd" "/etc/systemd/system" "${UNITS=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service srt-watchdog.service srt-watchdog.timer)[ ! -f "$DROPIN_DST" ] || ! diff -q "$DROPIN_SRC" "$DROPIN_DST" &>/dev/null; } \
+    mapfile -t CHANGED_S   < <(changed_files "$SCRIPT_DIR"          "$DEST"                  "${ALL_SCRIPTS[@]}")
+    mapfile -t CHANGED_CFG < <(changed_files "$SCRIPT_DIR"          "$DEST"                  "${CONFIGS[@]}")
+    mapfile -t CHANGED_U   < <(changed_files "$SCRIPT_DIR/systemd"  "/etc/systemd/system"    "${UNITS[@]}")
+
+    DROPIN_CHANGED=0
+    { [ ! -f "$DROPIN_DST" ] || ! diff -q "$DROPIN_SRC" "$DROPIN_DST" &>/dev/null; } \
         && DROPIN_CHANGED=1
 
-    TOTAL=$(( ${#CHANGED_S[@]}SERVICES=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service)${#CHANGED_U[@]} + DROPIN_CHANGED ))
+    TOTAL=$(( ${#CHANGED_S[@]} + ${#CHANGED_CFG[@]} + ${#CHANGED_U[@]} + DROPIN_CHANGED ))
 
     if [ "$TOTAL" -eq 0 ]; then
         echo "  No changes detected — installed files match repo."
@@ -135,10 +156,12 @@ if [ "$EXISTING" -eq 1 ]; then
         confirm "  Force reinstall anyway?" || { echo "  Aborted."; exit 0; }
         mapfile -t CHANGED_S   < <(printf '%s\n' "${ALL_SCRIPTS[@]}")
         mapfile -t CHANGED_CFG < <(printf '%s\n' "${CONFIGS[@]}")
-        mapfile -t CHANGED_U   < <(printf '%s\n' "${UNITS=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service srt-watchdog.service srt-watchdog.timer)
+        mapfile -t CHANGED_U   < <(printf '%s\n' "${UNITS[@]}")
+        DROPIN_CHANGED=1
+    else
         echo "  The following will be updated:"
         echo ""
-        for f in "SERVICES=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service)"    $f"; done
+        for f in "${CHANGED_S[@]+"${CHANGED_S[@]}"}";   do echo "    $f"; done
         for f in "${CHANGED_CFG[@]+"${CHANGED_CFG[@]}"}"; do echo "    $f"; done
         for f in "${CHANGED_U[@]+"${CHANGED_U[@]}"}";   do echo "    systemd/$f"; done
         [ "$DROPIN_CHANGED" -eq 1 ] \
@@ -155,10 +178,11 @@ if [ "$EXISTING" -eq 1 ]; then
                 src="$SCRIPT_DIR/$c"; dst="$DEST/$c"
                 [ -f "$src" ] && [ -f "$dst" ] && diff --color=always -u "$dst" "$src" || true
             done
-            for u in "${UNITS=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service srt-watchdog.service srt-watchdog.timer)
+            for u in "${UNITS[@]}"; do
+                src="$SCRIPT_DIR/systemd/$u"; dst="/etc/systemd/system/$u"
                 [ -f "$src" ] && [ -f "$dst" ] && diff --color=always -u "$dst" "$src" || true
             done
-     SERVICES=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service)-eq 1 ] && [ -f "$DROPIN_DST" ] \
+            [ "$DROPIN_CHANGED" -eq 1 ] && [ -f "$DROPIN_DST" ] \
                 && diff --color=always -u "$DROPIN_DST" "$DROPIN_SRC" || true
             echo ""
         fi
@@ -168,8 +192,8 @@ if [ "$EXISTING" -eq 1 ]; then
 
     # Stop services
     log "Stopping services..."
-    systemctl stop srt-watchdog.timer   2>/dev/null || true
-    systemctl stop srt-watchdog.service 2>/dev/null || true
+    systemctl stop srt-watchdog.timer    2>/dev/null || true
+    systemctl stop srt-watchdog.service  2>/dev/null || true
     for s in "${SERVICES[@]}"; do systemctl stop "$s" 2>/dev/null || true; done
 
     # Zero drive pins for safety
@@ -182,13 +206,13 @@ if [ "$EXISTING" -eq 1 ]; then
     apply_fuse_conf
     apply_dropin
 
-    # Update scripts
     log "Updating HAL scripts"
     install_scripts "${HAL_SCRIPTS[@]}"
+
     log "Updating control scripts"
     install_scripts "${CTL_SCRIPTS[@]}"
 
-    # Update config — per-file confirmation to protect local calibration
+    # Config — per-file confirmation to protect local calibration edits
     for c in "${CHANGED_CFG[@]+"${CHANGED_CFG[@]}"}"; do
         cf="${c%  \[NEW\]}"
         src="$SCRIPT_DIR/$cf"; dst="$DEST/$cf"
@@ -206,16 +230,15 @@ if [ "$EXISTING" -eq 1 ]; then
         fi
     done
 
-    # Update systemd units
     log "Updating systemd units"
-    for u in "${UNITS=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service srt-watchdog.service srt-watchdog.timer)"$SCRIPT_DIR/systemd/$u" ] \
-            && cpSERVICES=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service)done
+    for u in "${UNITS[@]}"; do
+        [ -f "$SCRIPT_DIR/systemd/$u" ] \
+            && cp "$SCRIPT_DIR/systemd/$u" "/etc/systemd/system/$u"
+    done
 
-    # Fix ownership
     chown -R srt:srt "$DEST"
     chown root:root "$DEST/control/srt-watchdog"
 
-    # Reload and restart
     log "Reloading systemd and restarting services"
     systemctl daemon-reload
     systemctl enable "${SERVICES[@]}" "$TIMER"
@@ -238,20 +261,21 @@ else
     apply_fuse_conf
     apply_dropin
 
-    mkdir -p "$DEST/config"
+    mkdir -p "$DEST"
 
     log "Installing HAL scripts"
     install_scripts "${HAL_SCRIPTS[@]}"
+
     log "Installing control scripts"
     install_scripts "${CTL_SCRIPTS[@]}"
 
     log "Copying config"
-    cp "$SCRIPT_DIR/config/pin_map" "$DEST/config/"
-    cp "$SCRIPT_DIR/config/az_cal"  "$DEST/config/"
-    cp "$SCRIPT_DIR/config/el_cal"  "$DEST/config/"
-    
+    install_config
+
     log "Installing systemd units"
-    for u in "${UNITS=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service srt-watchdog.service srt-watchdog.timer)"/eSERVICES=(srt-init.service srt-go.service srt-gs232.service srt-gs232-dev.service)
+    for u in "${UNITS[@]}"; do
+        cp "$SCRIPT_DIR/systemd/$u" "/etc/systemd/system/$u"
+    done
 
     chown -R srt:srt "$DEST"
     chown root:root "$DEST/control/srt-watchdog"
@@ -281,6 +305,7 @@ echo "  Services:"
 echo "    srt-init.service      HAL initialiser + sentinel"
 echo "    srt-go.service        go/ axis controller"
 echo "    srt-gs232.service     GS-232 PTY daemon"
+echo "    srt-gs232-dev.service PTY symlink in /dev"
 echo "    srt-watchdog.timer    health check every 30s"
 echo ""
 echo "  Check status:"
@@ -294,4 +319,3 @@ echo "  Quick test once RP2040 is connected:"
 echo "    cat /mnt/srt/enc/az_raw"
 echo "    echo 1 > /mnt/srt/go/cw && sleep 1 && echo 0 > /mnt/srt/go/cw"
 echo "    minicom -D /dev/srt_rotator   # send: C"
-
